@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HAR Analyzer · find the failing request fast</title>
+<meta name="description" content="Drop in a browser HAR export and see failed requests, slow calls and likely causes. Runs entirely in your browser.">
+<style>
+:root{
+  --bg:#0b0d10;--panel:#12151a;--panel2:#171b21;--line:#232830;--line2:#2d333d;
+  --text:#e6e8eb;--muted:#8b93a1;--dim:#5f6774;
+  --ok:#3fb950;--warn:#d29922;--bad:#f85149;--info:#58a6ff;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif;
+  --r:10px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+.wrap{max-width:1240px;margin:0 auto;padding:28px 24px 56px}
+header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.brand{display:flex;align-items:center;gap:12px}
+.mark{width:38px;height:38px;border-radius:9px;background:var(--accent);display:grid;place-items:center;color:#0b0d10;font:700 15px var(--mono);letter-spacing:-.5px;flex:none}
+h1{font-size:20px;margin:0;letter-spacing:-.2px}
+.tag{color:var(--muted);margin:2px 0 0;font-size:13.5px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+button,.btn{appearance:none;border:1px solid var(--line2);background:var(--panel2);color:var(--text);font:500 13px var(--sans);padding:7px 12px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;text-decoration:none}
+button:hover,.btn:hover{border-color:var(--dim)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#0b0d10;font-weight:600}
+button.primary:hover{filter:brightness(1.08)}
+button.ghost{background:transparent}
+.grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:16px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.panel>.hd{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);font:600 12px var(--mono);text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
+.panel>.bd{padding:14px}
+textarea,input[type=text],input[type=number],select{width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:8px;color:var(--text);font:12.5px/1.55 var(--mono);padding:10px 11px;outline:none}
+textarea{resize:vertical;min-height:260px}
+textarea:focus,input:focus,select:focus{border-color:var(--accent)}
+label.f{display:block;font:600 11.5px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:12px 0 6px}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.stat .k{font:600 11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.stat .v{font:600 20px var(--sans);margin-top:2px;letter-spacing:-.3px}
+.stat.bad .v{color:var(--bad)}.stat.warn .v{color:var(--warn)}.stat.ok .v{color:var(--ok)}
+.findings{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.finding{display:flex;gap:10px;align-items:flex-start;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--info);border-radius:8px;padding:9px 12px}
+.finding.bad{border-left-color:var(--bad)}.finding.warn{border-left-color:var(--warn)}.finding.ok{border-left-color:var(--ok)}
+.finding b{display:block;font-size:13.5px}
+.finding span{color:var(--muted);font-size:13px}
+.pill{display:inline-block;font:600 11px var(--mono);padding:2px 7px;border-radius:999px;border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
+.pill.bad{color:var(--bad);border-color:#5a2526;background:#2a1213}
+.pill.warn{color:var(--warn);border-color:#4d3a12;background:#261d09}
+.pill.ok{color:var(--ok);border-color:#1f4a2a;background:#0f2416}
+.pill.info{color:var(--info);border-color:#1d3a5c;background:#0d1b2c}
+.empty{color:var(--dim);text-align:center;padding:48px 16px;font-size:13.5px}
+.empty b{display:block;color:var(--muted);font-size:14.5px;margin-bottom:4px}
+code,.mono{font-family:var(--mono);font-size:12.5px}
+.kv{display:grid;grid-template-columns:minmax(110px,max-content) 1fr;gap:6px 14px;font-size:13px}
+.kv dt{color:var(--muted);font-family:var(--mono);font-size:12px;padding-top:1px}
+.kv dd{margin:0;word-break:break-all}
+.note{color:var(--dim);font-size:12.5px;margin-top:10px}
+footer.foot{margin-top:28px;color:var(--dim);font-size:12.5px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;border-top:1px solid var(--line);padding-top:14px}
+footer.foot a{color:var(--muted)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--panel2);border:1px solid var(--line2);padding:8px 14px;border-radius:8px;opacity:0;transition:.2s;pointer-events:none;font-size:13px}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.tabs{display:flex;gap:4px;padding:4px;background:var(--bg);border:1px solid var(--line);border-radius:9px;width:max-content}
+.tabs button{border:0;background:transparent;color:var(--muted);padding:6px 14px}
+.tabs button.on{background:var(--panel2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line2)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chips button{padding:4px 10px;font-size:12px;border-radius:999px}
+.chips button.on{border-color:var(--accent);color:var(--accent)}
+pre.out{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font:12.5px/1.55 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
+h3.sec{font:600 12px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:18px 0 8px}
+h3.sec:first-child{margin-top:0}
+
+:root{--accent:#2dd4bf}
+.drop{border:1.5px dashed var(--line2);border-radius:10px;padding:26px 16px;text-align:center;color:var(--muted);cursor:pointer;transition:.15s}
+.drop:hover,.drop.over{border-color:var(--accent);color:var(--text);background:#0f1a19}
+.drop b{color:var(--text);display:block;font-size:14.5px;margin-bottom:3px}
+.or{display:flex;align-items:center;gap:10px;color:var(--dim);font:600 11px var(--mono);margin:12px 0}
+.or:before,.or:after{content:"";flex:1;height:1px;background:var(--line)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font:600 11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.4px;padding:7px 8px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
+td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr.r{cursor:pointer}tr.r:hover td{background:var(--panel2)}
+tr.r.sel td{background:#10201e}
+td.url{font-family:var(--mono);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.url small{color:var(--dim)}
+td.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+.wf{position:relative;height:8px;background:var(--bg);border-radius:4px;min-width:110px}
+.wf i{position:absolute;top:0;bottom:0;border-radius:4px;background:var(--accent);opacity:.85}
+.wf i.slow{background:var(--warn)}.wf i.err{background:var(--bad)}
+.tablewrap{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.timing{display:flex;height:12px;border-radius:4px;overflow:hidden;margin:6px 0 4px;background:var(--bg)}
+.timing span{display:block;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font:11.5px var(--mono);color:var(--muted)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><div class="mark">HAR</div><div><h1>HAR Analyzer</h1><p class="tag">Drop in a browser network export. See what failed, what was slow and the likely cause.</p></div></div>
+    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button class="ghost" id="clear">Clear</button></div>
+  </header>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="hd">Input <span class="pill">stays in your browser</span></div>
+      <div class="bd">
+        <div class="drop" id="drop"><b>Drop a .har file here</b>or click to choose one<input type="file" id="file" accept=".har,.json,application/json" hidden></div>
+        <div class="or">OR PASTE JSON</div>
+        <textarea id="raw" spellcheck="false" placeholder='{"log":{"entries":[ ... ]}}'></textarea>
+        <div class="row" style="margin-top:10px">
+          <div><label class="f">Slow threshold (ms)</label><input type="number" id="slow" value="1000" min="50" step="50"></div>
+          <div><label class="f">Redact in summary</label><select id="redact"><option value="1">Strip query strings</option><option value="0">Keep full URLs</option></select></div>
+        </div>
+        <p class="note">How to get a HAR: open DevTools → Network → reproduce the issue → right-click any request → <em>Save all as HAR</em>. HAR files can contain cookies and tokens. This page never uploads them.</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="hd">Analysis <span id="meta" class="mono" style="text-transform:none;letter-spacing:0"></span></div>
+      <div class="bd" id="out"><div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div></div>
+    </div>
+  </div>
+
+  <div class="panel" id="detailPanel" style="margin-top:16px;display:none">
+    <div class="hd">Request detail <button class="ghost" id="closeDetail" style="padding:3px 9px">Close</button></div>
+    <div class="bd" id="detail"></div>
+  </div>
+
+  <footer class="foot"><span>Built by <a href="https://github.com/rajprasad19">Raj Prasad</a>, a support engineer who got tired of scrolling through 900-line HARs.</span><span>No uploads · no tracking · <a href="https://github.com/rajprasad19/har-analyzer">source</a></span></footer>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+let entries=[],filter='all',selected=-1;
+const TCOL={blocked:'#5f6774',dns:'#a371f7',connect:'#f0883e',ssl:'#db61a2',send:'#58a6ff',wait:'#2dd4bf',receive:'#3fb950'};
+
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1600)}
+function fmtB(b){if(b==null||b<0)return '—';if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(2)+' MB'}
+function fmtMs(ms){if(ms==null||ms<0)return '—';return ms<1000?Math.round(ms)+' ms':(ms/1000).toFixed(2)+' s'}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function hdr(list,name){const h=(list||[]).find(x=>x.name.toLowerCase()===name);return h?h.value:''}
+
+function typeOf(e){
+  const mt=(e.response?.content?.mimeType||'').toLowerCase(),u=e.request.url.toLowerCase(),rt=(e._resourceType||'').toLowerCase();
+  if(rt==='xhr'||rt==='fetch'||mt.includes('json'))return 'api';
+  if(mt.includes('javascript')||/\.m?js(\?|$)/.test(u))return 'js';
+  if(mt.includes('css')||/\.css(\?|$)/.test(u))return 'css';
+  if(mt.startsWith('image/')||/\.(png|jpe?g|gif|svg|webp|ico)(\?|$)/.test(u))return 'img';
+  if(mt.includes('font')||/\.(woff2?|ttf|otf)(\?|$)/.test(u))return 'font';
+  if(mt.includes('html'))return 'doc';
+  return 'other';
+}
+
+function load(text){
+  let j;try{j=JSON.parse(text)}catch(err){return showErr('That isn\'t valid JSON. HAR files are JSON with a top-level "log" object. ('+err.message+')')}
+  const list=j?.log?.entries;if(!Array.isArray(list))return showErr('Couldn\'t find log.entries. Is this a HAR export?');
+  const t0=Math.min(...list.map(e=>Date.parse(e.startedDateTime)||0));
+  entries=list.map((e,i)=>{const st=(Date.parse(e.startedDateTime)||t0)-t0;const u=(()=>{try{return new URL(e.request.url)}catch{return null}})();
+    return {i,e,start:st,time:e.time??0,status:e.response?.status??0,method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
+  selected=-1;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;
+}
+function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true}
+
+function analyze(){
+  const slow=+$('#slow').value||1000,F=[];
+  const fail=entries.filter(x=>x.status>=400||x.status===0);
+  const s5=entries.filter(x=>x.status>=500),s4=entries.filter(x=>x.status>=400&&x.status<500),s0=entries.filter(x=>x.status===0);
+  const auth=s4.filter(x=>x.status===401||x.status===403),nf=s4.filter(x=>x.status===404),rl=s4.filter(x=>x.status===429);
+  const slowL=entries.filter(x=>x.time>=slow&&x.status!==0);
+  const ttfb=entries.filter(x=>(x.e.timings?.wait||0)>=Math.min(800,slow*.8));
+  const by=a=>[...new Set(a.map(x=>x.host))].join(', ');
+  if(s5.length)F.push(['bad',`${s5.length} server error${s5.length>1?'s':''} (5xx)`,`The server failed to handle these requests (${by(s5)}). That points to the backend, not the customer's browser. Escalate to engineering with the timestamps and request IDs.`]);
+  if(s0.length)F.push(['bad',`${s0.length} request${s0.length>1?'s':''} never got a response (status 0)`,`Usually CORS blocking, an ad blocker or extension, a firewall or proxy, or the request was cancelled by navigation. Check the console for CORS errors and retry in an incognito window.`]);
+  if(auth.length)F.push(['warn',`${auth.length} auth failure${auth.length>1?'s':''} (401/403)`,`The session or token was rejected on ${by(auth)}. Likely an expired session, a missing permission or an SSO misconfiguration. Ask the customer to sign out and back in, then check their role.`]);
+  if(rl.length)F.push(['warn',`${rl.length} rate-limited request${rl.length>1?'s':''} (429)`,`The client is sending too many requests. Look for retry loops or a script hammering the API.`+(hdr(rl[0].e.response.headers,'retry-after')?` Retry-After: ${hdr(rl[0].e.response.headers,'retry-after')}s.`:'')]);
+  if(nf.length)F.push(['info',`${nf.length} not found (404)`,`Missing resources or a wrong API path: ${nf.slice(0,3).map(x=>x.path.split('?')[0]).join(', ')}${nf.length>3?'…':''}.`]);
+  if(slowL.length)F.push(['warn',`${slowL.length} slow request${slowL.length>1?'s':''} (≥ ${fmtMs(slow)})`,`Slowest: ${slowL.slice().sort((a,b)=>b.time-a.time).slice(0,2).map(x=>x.path.split('?')[0]+' ('+fmtMs(x.time)+')').join(', ')}.`+(ttfb.length?` Most of that time is server wait (TTFB), so the backend is slow rather than the network.`:'')]);
+  const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
+  if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
+  return {F,fail,slowL,s4,s5,s0};
+}
+
+function render(){
+  if(!entries.length)return;
+  const a=analyze(),total=Math.max(...entries.map(x=>x.start+x.time)),bytes=entries.reduce((s,x)=>s+(x.size>0?x.size:0),0);
+  $('#meta').textContent=entries.length+' requests · '+[...new Set(entries.map(x=>x.host))].length+' hosts';
+  const types=['all','errors','slow','api','js','css','img','doc'];
+  let rows=entries.filter(x=>filter==='all'||(filter==='errors'?(x.status>=400||x.status===0):filter==='slow'?a.slowL.includes(x):x.type===filter));
+  $('#out').innerHTML=`
+  <div class="stats">
+    <div class="stat"><div class="k">Requests</div><div class="v">${entries.length}</div></div>
+    <div class="stat ${a.fail.length?'bad':'ok'}"><div class="k">Failed</div><div class="v">${a.fail.length}</div></div>
+    <div class="stat ${a.slowL.length?'warn':''}"><div class="k">Slow</div><div class="v">${a.slowL.length}</div></div>
+    <div class="stat"><div class="k">Transferred</div><div class="v">${fmtB(bytes)}</div></div>
+    <div class="stat"><div class="k">Timeline</div><div class="v">${fmtMs(total)}</div></div>
+  </div>
+  <h3 class="sec">Findings</h3>
+  <div class="findings">${a.F.map(([k,t,d])=>`<div class="finding ${k}"><div><b>${esc(t)}</b><span>${esc(d)}</span></div></div>`).join('')}</div>
+  <h3 class="sec">Requests</h3>
+  <div class="chips" style="margin-bottom:10px">${types.map(t=>`<button data-f="${t}" class="${filter===t?'on':''}">${t}</button>`).join('')}</div>
+  <div class="tablewrap"><table><thead><tr><th>Status</th><th>Method</th><th>URL</th><th>Type</th><th class="num">Size</th><th class="num">Time</th><th>Waterfall</th></tr></thead><tbody>
+  ${rows.map(x=>{const err=x.status>=400||x.status===0,sl=a.slowL.includes(x);const pc=err?(x.status>=500||x.status===0?'bad':'warn'):x.status>=300?'info':'ok';
+    return `<tr class="r ${selected===x.i?'sel':''}" data-i="${x.i}"><td><span class="pill ${pc}">${x.status||'ERR'}</span></td><td class="mono">${x.method}</td><td class="url" title="${esc(x.url)}"><small>${esc(x.host)}</small> ${esc(x.path)}</td><td class="mono">${x.type}</td><td class="num">${fmtB(x.size)}</td><td class="num">${fmtMs(x.time)}</td><td><div class="wf"><i class="${err?'err':sl?'slow':''}" style="left:${x.start/total*100}%;width:${Math.max(.8,x.time/total*100)}%"></i></div></td></tr>`}).join('')||'<tr><td colspan="7" class="empty" style="padding:22px">No requests match this filter.</td></tr>'}
+  </tbody></table></div>`;
+  document.querySelectorAll('.chips button').forEach(b=>b.onclick=()=>{filter=b.dataset.f;render()});
+  document.querySelectorAll('tr.r').forEach(r=>r.onclick=()=>{selected=+r.dataset.i;render();detail(entries[selected])});
+}
+
+function detail(x){
+  const e=x.e,t=e.timings||{},tot=Object.keys(TCOL).reduce((s,k)=>s+Math.max(0,t[k]||0),0)||1;
+  const H=list=>(list||[]).length?`<dl class="kv">${list.map(h=>`<dt>${esc(h.name)}</dt><dd>${/^(cookie|set-cookie|authorization)$/i.test(h.name)?'<span class="pill warn">redacted</span>':esc(h.value)}</dd>`).join('')}</dl>`:'<span class="note">None captured</span>';
+  const body=e.response?.content?.text;
+  $('#detailPanel').style.display='';
+  $('#detail').innerHTML=`<div class="grid" style="grid-template-columns:1fr 1fr">
+  <div><h3 class="sec">Overview</h3><dl class="kv"><dt>URL</dt><dd class="mono">${esc(x.url)}</dd><dt>Status</dt><dd>${x.status} ${esc(e.response?.statusText||'')}</dd><dt>Started</dt><dd>${esc(e.startedDateTime)}</dd><dt>Server IP</dt><dd>${esc(e.serverIPAddress||'—')}</dd><dt>Request ID</dt><dd class="mono">${esc(hdr(e.response?.headers,'x-request-id')||hdr(e.response?.headers,'cf-ray')||'—')}</dd></dl>
+  <h3 class="sec">Timing · ${fmtMs(x.time)}</h3><div class="timing">${Object.keys(TCOL).map(k=>(t[k]>0?`<span title="${k} ${fmtMs(t[k])}" style="width:${t[k]/tot*100}%;background:${TCOL[k]}"></span>`:'')).join('')}</div>
+  <div class="legend">${Object.keys(TCOL).filter(k=>t[k]>0).map(k=>`<span><i style="background:${TCOL[k]}"></i>${k} ${fmtMs(t[k])}</span>`).join('')}</div>
+  ${body?`<h3 class="sec">Response body</h3><pre class="out">${esc(body.length>3000?body.slice(0,3000)+'\n… (truncated)':body)}</pre>`:''}</div>
+  <div><h3 class="sec">Request headers</h3>${H(e.request.headers)}<h3 class="sec">Response headers</h3>${H(e.response?.headers)}</div></div>`;
+  $('#detailPanel').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function summary(){
+  const a=analyze(),red=$('#redact').value==='1',U=x=>red?x.host+x.path.split('?')[0]:x.url;
+  const L=['**HAR summary**',`- ${entries.length} requests, ${a.fail.length} failed, ${a.slowL.length} slow (≥ ${$('#slow').value} ms)`,'','**Findings**',...a.F.map(f=>`- ${f[1]}: ${f[2]}`)];
+  if(a.fail.length){L.push('','**Failed requests**');a.fail.slice(0,10).forEach(x=>L.push(`- \`${x.status||'ERR'} ${x.method} ${U(x)}\` at ${x.e.startedDateTime}${hdr(x.e.response?.headers,'x-request-id')?' (request id '+hdr(x.e.response.headers,'x-request-id')+')':''}`))}
+  if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
+  return L.join('\n');
+}
+
+function makeSample(){
+  const base=Date.parse('2026-11-18T17:42:10.000Z');let off=0;
+  const H=(o)=>Object.entries(o).map(([name,value])=>({name,value}));
+  const mk=(method,url,status,mime,size,tm,extra={})=>{off+=extra.gap??40;const timings={blocked:2,dns:extra.dns||-1,connect:extra.conn||-1,ssl:extra.ssl||-1,send:1,wait:tm.wait,receive:tm.recv};
+    const time=Object.values(timings).reduce((s,v)=>s+(v>0?v:0),0);
+    return {startedDateTime:new Date(base+off).toISOString(),time,request:{method,url,httpVersion:'h2',headers:H({accept:'*/*','user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0',...(extra.reqH||{})}),queryString:[],cookies:[],headersSize:-1,bodySize:0},
+      response:{status,statusText:extra.st||'',httpVersion:'h2',headers:H({'content-type':mime,...(extra.resH||{})}),cookies:[],content:{size,mimeType:mime,...(extra.body?{text:extra.body}:{})},redirectURL:'',headersSize:-1,bodySize:size,_transferSize:size},
+      cache:{},timings,serverIPAddress:extra.ip||'104.18.22.61',_resourceType:extra.rt||''}};
+  const E=[
+    mk('GET','https://app.acmecloud.io/dashboard',200,'text/html',18432,{wait:180,recv:12},{dns:24,conn:31,ssl:42,st:'OK',rt:'document',gap:0}),
+    mk('GET','https://app.acmecloud.io/static/js/main.4f2a91.js',200,'application/javascript',412880,{wait:38,recv:96},{rt:'script'}),
+    mk('GET','https://app.acmecloud.io/static/css/app.9c1d.css',200,'text/css',48210,{wait:31,recv:14},{rt:'stylesheet',gap:4}),
+    mk('GET','https://fonts.gstatic.com/s/inter/v13/inter-latin.woff2',200,'font/woff2',47220,{wait:22,recv:9},{dns:18,conn:20,ssl:26,rt:'font'}),
+    mk('GET','https://app.acmecloud.io/static/img/logo.svg',200,'image/svg+xml',3120,{wait:24,recv:2},{rt:'image',gap:10}),
+    mk('GET','https://api.acmecloud.io/v2/me',200,'application/json',812,{wait:142,recv:3},{dns:21,conn:29,ssl:38,rt:'fetch',gap:180,resH:{'x-request-id':'req_7Hc2KpX91'},body:'{"id":"usr_4182","email":"dana@northwind.co","role":"member","org":"org_northwind"}'}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/projects?limit=50',200,'application/json',9412,{wait:388,recv:11},{rt:'fetch',resH:{'x-request-id':'req_7Hc2LmQ04'}}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/billing/invoices',403,'application/json',214,{wait:96,recv:1},{rt:'fetch',st:'Forbidden',resH:{'x-request-id':'req_7Hc2Lr8Zt'},body:'{"error":{"code":"insufficient_role","message":"Role member cannot read billing. Required: admin or billing_manager."}}'}),
+    mk('POST','https://api.acmecloud.io/v2/orgs/org_northwind/exports',502,'text/html',166,{wait:30012,recv:2},{rt:'fetch',st:'Bad Gateway',resH:{'x-request-id':'req_7Hc2M0aDe'},body:'<html><body><h1>502 Bad Gateway</h1><p>upstream timed out (30s) while reading response header from export-worker</p></body></html>',reqH:{'content-type':'application/json'}}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=1',200,'application/json',22140,{wait:2410,recv:18},{rt:'fetch',gap:60,resH:{'x-request-id':'req_7Hc2M3vYp'}}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=2',200,'application/json',21880,{wait:2290,recv:17},{rt:'fetch',gap:20,resH:{'x-request-id':'req_7Hc2M4bLq'}}),
+    mk('GET','https://app.acmecloud.io/static/img/empty-state.png',404,'text/html',148,{wait:44,recv:1},{rt:'image',st:'Not Found'}),
+    mk('POST','https://events.thirdparty-analytics.com/v1/track',0,'',0,{wait:-1,recv:-1},{rt:'fetch',st:'',gap:15,ip:''}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:61,recv:1},{rt:'fetch',st:'Too Many Requests',resH:{'retry-after':'30','x-request-id':'req_7Hc2N1wTs'},body:'{"error":{"code":"rate_limited","message":"Too many requests"}}'}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
+    mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script'}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',resH:{'x-request-id':'req_7Hc2P8kRr'}}),
+    mk('GET','http://cdn.legacy-widgets.net/badge.js',200,'application/javascript',8120,{wait:210,recv:8},{rt:'script',dns:44,conn:61,ip:'93.184.216.34'}),
+  ];
+  return JSON.stringify({log:{version:'1.2',creator:{name:'Sample generator',version:'1.0'},pages:[],entries:E}},null,2);
+}
+
+$('#sample').onclick=()=>{const s=makeSample();$('#raw').value=s;load(s);toast('Loaded a sample HAR from a fake SaaS dashboard')};
+$('#clear').onclick=()=>{entries=[];$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
+$('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());toast('Summary copied as Markdown')}catch{toast('Clipboard blocked by the browser')}};
+$('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
+$('#slow').oninput=()=>render();
+let deb;$('#raw').oninput=()=>{clearTimeout(deb);deb=setTimeout(()=>{const v=$('#raw').value.trim();if(v)load(v)},400)};
+const d=$('#drop'),f=$('#file');d.onclick=()=>f.click();
+f.onchange=()=>f.files[0]&&f.files[0].text().then(t=>{$('#raw').value=t.length>200000?'(large file loaded; not shown here)':t;load(t)});
+['dragenter','dragover'].forEach(ev=>d.addEventListener(ev,e=>{e.preventDefault();d.classList.add('over')}));
+['dragleave','drop'].forEach(ev=>d.addEventListener(ev,e=>{e.preventDefault();d.classList.remove('over')}));
+d.addEventListener('drop',e=>{const file=e.dataTransfer.files[0];if(file)file.text().then(t=>{$('#raw').value=t.length>200000?'(large file loaded; not shown here)':t;load(t)})});
+if(location.hash==='#sample')$('#sample').click();
+</script>
+</body>
+</html>
