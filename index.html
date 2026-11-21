@@ -100,6 +100,12 @@ td.num{text-align:right;font-family:var(--mono);white-space:nowrap}
 .filterbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 .filterbar input{flex:1;min-width:0;padding:7px 10px}
 .filterbar .pill{flex:none}
+.hostwrap{max-height:232px;margin-bottom:4px}
+tr.h{cursor:pointer}tr.h:hover td{background:var(--panel2)}tr.h:focus{outline:none}tr.h:focus-visible td{background:var(--panel2)}
+tr.h.sel td{background:#10201e}tr.h.sel td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
+td.host{font-family:var(--mono);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
+@media (max-width:600px){#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}}
 </style>
 </head>
 <body>
@@ -141,7 +147,7 @@ td.num{text-align:right;font-family:var(--mono);white-space:nowrap}
 
 <script>
 const $=s=>document.querySelector(s);
-let entries=[],filter='all',selected=-1,query='',view=null;
+let entries=[],filter='all',selected=-1,query='',hostF=null,view=null;
 const TCOL={blocked:'#5f6774',dns:'#a371f7',connect:'#f0883e',ssl:'#db61a2',send:'#58a6ff',wait:'#2dd4bf',receive:'#3fb950'};
 
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1600)}
@@ -167,7 +173,7 @@ function load(text){
   const t0=Math.min(...list.map(e=>Date.parse(e.startedDateTime)||0));
   entries=list.map((e,i)=>{const st=(Date.parse(e.startedDateTime)||t0)-t0;const u=(()=>{try{return new URL(e.request.url)}catch{return null}})();
     return {i,e,start:st,time:e.time??0,status:e.response?.status??0,method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
-  selected=-1;query='';$('#detailPanel').style.display='none';render();$('#copy').disabled=false;
+  selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;
 }
 function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true}
 
@@ -190,12 +196,21 @@ function analyze(){
   return {F,fail,slowL,s4,s5,s0};
 }
 
+// One row per host: request count, failures (4xx/5xx/status 0), error rate and summed request time. Worst hosts first.
+function hostStats(){
+  const m=new Map();
+  entries.forEach(x=>{const h=m.get(x.host)||{host:x.host,n:0,err:0,time:0};h.n++;if(x.status>=400||x.status===0)h.err++;h.time+=Math.max(0,x.time||0);m.set(x.host,h)});
+  return [...m.values()].map(h=>({...h,rate:h.n?h.err/h.n:0})).sort((a,b)=>b.err-a.err||b.rate-a.rate||b.n-a.n||a.host.localeCompare(b.host));
+}
+
 function render(){
   if(!entries.length)return;
   const a=analyze(),total=Math.max(...entries.map(x=>x.start+x.time)),bytes=entries.reduce((s,x)=>s+(x.size>0?x.size:0),0);
   $('#meta').textContent=entries.length+' requests · '+[...new Set(entries.map(x=>x.host))].length+' hosts';
   const types=['all','errors','slow','api','js','css','img','doc'];
   view={a,total};
+  const hs=hostStats();if(hostF!==null&&!hs.some(h=>h.host===hostF))hostF=null;
+  const hostName=h=>h?esc(h):'<span style="color:var(--dim)">(no host)</span>';
   $('#out').innerHTML=`
   <div class="stats">
     <div class="stat"><div class="k">Requests</div><div class="v">${entries.length}</div></div>
@@ -206,14 +221,20 @@ function render(){
   </div>
   <h3 class="sec">Findings</h3>
   <div class="findings">${a.F.map(([k,t,d])=>`<div class="finding ${k}"><div><b>${esc(t)}</b><span>${esc(d)}</span></div></div>`).join('')}</div>
+  <h3 class="sec">Hosts · ${hs.length}</h3>
+  <div class="tablewrap hostwrap"><table id="hosts"><thead><tr><th>Host</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num opt">Total time</th></tr></thead><tbody>${hs.map(h=>{const pc=h.err?(h.rate>=.5?'bad':'warn'):'ok';
+    return `<tr class="h ${hostF===h.host?'sel':''}" data-h="${esc(h.host)}" tabindex="0" title="${hostF===h.host?'Click to show all hosts':'Click to filter requests to this host'}"><td class="host">${hostName(h.host)}</td><td class="num">${h.n}</td><td class="num">${h.err?`<span class="pill ${pc}">${h.err}</span>`:'<span style="color:var(--dim)">0</span>'}</td><td class="num">${Math.round(h.rate*100)}%</td><td class="num opt">${fmtMs(h.time)}</td></tr>`}).join('')}</tbody></table></div>
   <h3 class="sec">Requests</h3>
-  <div class="filterbar"><input type="text" id="q" value="${esc(query)}" placeholder="Search URL, method or status (e.g. invoices, POST, 5xx)" aria-label="Search requests" autocomplete="off" spellcheck="false"><span class="pill" id="qcount"></span></div>
+  <div class="filterbar"><input type="text" id="q" value="${esc(query)}" placeholder="Search URL, method or status (e.g. invoices, POST, 5xx)" aria-label="Search requests" autocomplete="off" spellcheck="false">${hostF!==null?`<button class="pill info" id="hostClear" title="Show all hosts">${hostName(hostF)} ✕</button>`:''}<span class="pill" id="qcount"></span></div>
   <div class="chips" style="margin-bottom:10px">${types.map(t=>`<button data-f="${t}" class="${filter===t?'on':''}">${t}</button>`).join('')}</div>
   <div class="tablewrap"><table><thead><tr><th>Status</th><th>Method</th><th>URL</th><th>Type</th><th class="num">Size</th><th class="num">Time</th><th>Waterfall</th></tr></thead><tbody id="rows"></tbody></table></div>`;
   drawRows();
   const q=$('#q');q.oninput=()=>{query=q.value;drawRows()};
   q.onkeydown=e=>{if(e.key==='Escape'&&q.value){q.value='';query='';drawRows()}};
   document.querySelectorAll('.chips button').forEach(b=>b.onclick=()=>{filter=b.dataset.f;render()});
+  const pick=h=>{hostF=hostF===h?null:h;render();$('#q').scrollIntoView({block:'nearest'})};
+  document.querySelectorAll('tr.h').forEach(r=>{r.onclick=()=>pick(r.dataset.h);r.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick(r.dataset.h)}}});
+  const hc=$('#hostClear');if(hc)hc.onclick=()=>{hostF=null;render()};
 }
 
 // Every space-separated term must match the URL, the method or the status. "5xx" style terms match a status class; "err" matches status 0.
@@ -224,11 +245,11 @@ function matchQ(x,terms){
 
 function drawRows(){
   const {a,total}=view,terms=query.toLowerCase().split(/\s+/).filter(Boolean);
-  const byChip=entries.filter(x=>filter==='all'||(filter==='errors'?(x.status>=400||x.status===0):filter==='slow'?a.slowL.includes(x):x.type===filter));
+  const byChip=entries.filter(x=>(hostF===null||x.host===hostF)&&(filter==='all'||(filter==='errors'?(x.status>=400||x.status===0):filter==='slow'?a.slowL.includes(x):x.type===filter)));
   const rows=terms.length?byChip.filter(x=>matchQ(x,terms)):byChip;
   const c=$('#qcount');c.textContent=rows.length===entries.length?entries.length+' rows':rows.length+' of '+entries.length;c.className='pill'+(rows.length<entries.length?' info':'');
   $('#rows').innerHTML=rows.map(x=>{const err=x.status>=400||x.status===0,sl=a.slowL.includes(x);const pc=err?(x.status>=500||x.status===0?'bad':'warn'):x.status>=300?'info':'ok';
-    return `<tr class="r ${selected===x.i?'sel':''}" data-i="${x.i}"><td><span class="pill ${pc}">${x.status||'ERR'}</span></td><td class="mono">${x.method}</td><td class="url" title="${esc(x.url)}"><small>${esc(x.host)}</small> ${esc(x.path)}</td><td class="mono">${x.type}</td><td class="num">${fmtB(x.size)}</td><td class="num">${fmtMs(x.time)}</td><td><div class="wf"><i class="${err?'err':sl?'slow':''}" style="left:${x.start/total*100}%;width:${Math.max(.8,x.time/total*100)}%"></i></div></td></tr>`}).join('')||`<tr><td colspan="7" class="empty" style="padding:22px">${terms.length?'No requests match “'+esc(query.trim())+'”'+(filter!=='all'?' in '+esc(filter):'')+'. Press Esc to clear the search.':'No requests match this filter.'}</td></tr>`;
+    return `<tr class="r ${selected===x.i?'sel':''}" data-i="${x.i}"><td><span class="pill ${pc}">${x.status||'ERR'}</span></td><td class="mono">${x.method}</td><td class="url" title="${esc(x.url)}"><small>${esc(x.host)}</small> ${esc(x.path)}</td><td class="mono">${x.type}</td><td class="num">${fmtB(x.size)}</td><td class="num">${fmtMs(x.time)}</td><td><div class="wf"><i class="${err?'err':sl?'slow':''}" style="left:${x.start/total*100}%;width:${Math.max(.8,x.time/total*100)}%"></i></div></td></tr>`}).join('')||`<tr><td colspan="7" class="empty" style="padding:22px">${terms.length?'No requests match “'+esc(query.trim())+'”'+(filter!=='all'?' in '+esc(filter):'')+(hostF!==null?' on '+(esc(hostF)||'(no host)'):'')+'. Press Esc to clear the search.':'No requests match this filter'+(hostF!==null?' on '+(esc(hostF)||'(no host)'):'')+'.'}</td></tr>`;
   document.querySelectorAll('tr.r').forEach(r=>r.onclick=()=>{selected=+r.dataset.i;drawRows();detail(entries[selected])});
 }
 
@@ -286,7 +307,7 @@ function makeSample(){
 }
 
 $('#sample').onclick=()=>{const s=makeSample();$('#raw').value=s;load(s);toast('Loaded a sample HAR from a fake SaaS dashboard')};
-$('#clear').onclick=()=>{entries=[];query='';$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
+$('#clear').onclick=()=>{entries=[];query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
 $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());toast('Summary copied as Markdown')}catch{toast('Clipboard blocked by the browser')}};
 $('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
 $('#slow').oninput=()=>render();

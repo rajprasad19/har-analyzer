@@ -8,6 +8,7 @@ Drop in a browser HAR export and see what failed, what was slow and the likely c
 
 ## Features
 - **Findings in plain English.** 5xx errors, status-0 requests (CORS, extensions, blocked), 401/403 auth failures, 429 rate limits with Retry-After, 404s, slow calls, and whether the slowness is server wait (TTFB) or the network
+- **Per-host breakdown.** Every host with its request count, errors, error rate and total time, worst first, so you can tell at a glance whether it's your API, a CDN or a third-party script that's failing. Click a host to filter the request table to it
 - **Filterable request table** with a waterfall, plus a detail view for headers, timing breakdown and response body. Cookies and auth headers are masked
 - **Search requests** by URL, method or status as you type. It stacks with the type chips, so `errors` + `invoices` finds the failing billing call in a second. Status classes like `5xx` work, and press `/` to jump to the box or `Esc` to clear it
 - **Copy summary for ticket** writes a Markdown summary with failed requests, timestamps and request IDs, ready for a Jira or Zendesk escalation
