@@ -105,7 +105,22 @@ tr.h{cursor:pointer}tr.h:hover td{background:var(--panel2)}tr.h:focus{outline:no
 tr.h.sel td{background:#10201e}tr.h.sel td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
 td.host{font-family:var(--mono);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
-@media (max-width:600px){#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}}
+.chains{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.chain{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:9px 12px;min-width:0}
+.chain.bad{border-left-color:var(--bad)}
+.chain>b{display:block;font-size:13.5px}
+.chain>.why{display:block;color:var(--muted);font-size:13px;margin-bottom:6px}
+.hops{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.hop{display:flex;align-items:center;gap:8px;min-width:0;font:12.5px var(--mono);padding:3px 6px;border-radius:6px;cursor:pointer}
+.hop:hover,.hop:focus-visible{background:var(--bg);outline:none}
+.hop .arr{color:var(--dim);flex:none;width:12px;text-align:center}
+.hop .pill{flex:none}
+.hop .u{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hop .u small{color:var(--dim)}
+.hop.rep .u{color:var(--bad)}
+.hop.ghost{cursor:default;color:var(--muted)}.hop.ghost:hover{background:none}
+.hop.more{cursor:default;color:var(--dim)}.hop.more:hover{background:none}
+@media (max-width:600px){.hop{align-items:flex-start}.hop .u{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}}
 </style>
 </head>
 <body>
@@ -187,13 +202,50 @@ function analyze(){
   const by=a=>[...new Set(a.map(x=>x.host))].join(', ');
   if(s5.length)F.push(['bad',`${s5.length} server error${s5.length>1?'s':''} (5xx)`,`The server failed to handle these requests (${by(s5)}). That points to the backend, not the customer's browser. Escalate to engineering with the timestamps and request IDs.`]);
   if(s0.length)F.push(['bad',`${s0.length} request${s0.length>1?'s':''} never got a response (status 0)`,`Usually CORS blocking, an ad blocker or extension, a firewall or proxy, or the request was cancelled by navigation. Check the console for CORS errors and retry in an incognito window.`]);
+  const rc=redirectChains().filter(c=>c.loop||c.n>=3).sort((p,q)=>(!!q.loop-!!p.loop)||q.n-p.n);
+  const loops=rc.filter(c=>c.loop),longC=rc.filter(c=>!c.loop);
+  if(loops.length){const c=loops[0];F.push(['bad',`${loops.length} redirect loop${loops.length>1?'s':''}`,`${shortU(c.loop)} redirected back to itself after ${c.loopAt} hop${c.loopAt>1?'s':''}, so the page never loads. Usually the login session isn't sticking (a cookie rejected for its domain or SameSite, or blocked third-party cookies) or two rules bounce between each other (http ↔ https, www ↔ bare domain, trailing slash). The chain is shown below.`])}
   if(auth.length)F.push(['warn',`${auth.length} auth failure${auth.length>1?'s':''} (401/403)`,`The session or token was rejected on ${by(auth)}. Likely an expired session, a missing permission or an SSO misconfiguration. Ask the customer to sign out and back in, then check their role.`]);
   if(rl.length)F.push(['warn',`${rl.length} rate-limited request${rl.length>1?'s':''} (429)`,`The client is sending too many requests. Look for retry loops or a script hammering the API.`+(hdr(rl[0].e.response.headers,'retry-after')?` Retry-After: ${hdr(rl[0].e.response.headers,'retry-after')}s.`:'')]);
+  if(longC.length){const c=longC[0];F.push(['warn',`${longC.length} long redirect chain${longC.length>1?'s':''} (3+ hops)`,`${shortU(c.urls[0])} took ${c.n} redirects to reach ${shortU(c.urls[c.urls.length-1])}. Each hop is another round trip before anything renders, and long chains often hide a misconfigured rewrite. Point the first URL straight at the final one.`])}
   if(nf.length)F.push(['info',`${nf.length} not found (404)`,`Missing resources or a wrong API path: ${nf.slice(0,3).map(x=>x.path.split('?')[0]).join(', ')}${nf.length>3?'…':''}.`]);
   if(slowL.length)F.push(['warn',`${slowL.length} slow request${slowL.length>1?'s':''} (≥ ${fmtMs(slow)})`,`Slowest: ${slowL.slice().sort((a,b)=>b.time-a.time).slice(0,2).map(x=>x.path.split('?')[0]+' ('+fmtMs(x.time)+')').join(', ')}.`+(ttfb.length?` Most of that time is server wait (TTFB), so the backend is slow rather than the network.`:'')]);
   const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
   if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
-  return {F,fail,slowL,s4,s5,s0};
+  return {F,fail,slowL,s4,s5,s0,rc};
+}
+
+// Redirect chains: each 3xx is linked to the next captured request for its redirectURL / Location target.
+// A chain is a loop when any URL shows up twice in it, including an uncaptured final target.
+function normU(u,base){try{const x=new URL(u,base);x.hash='';return x.href}catch{return null}}
+function shortU(u){try{const x=new URL(u);return (x.protocol==='http:'?'http://':'')+x.host+x.pathname}catch{return String(u)}}
+function redirectChains(){
+  const tg=entries.map(x=>{if(!(x.status>=300&&x.status<400))return null;const r=x.e.response||{},loc=r.redirectURL||hdr(r.headers,'location');return loc?normU(loc,x.url):null});
+  const nu=entries.map(x=>normU(x.url)),ord=entries.map((x,i)=>i).sort((p,q)=>entries[p].start-entries[q].start||p-q);
+  const pos=new Map(ord.map((k,n)=>[k,n])),next=new Map(),claimed=new Set();
+  ord.forEach(i=>{if(!tg[i])return;
+    const j=ord.find(k=>pos.get(k)>pos.get(i)&&!claimed.has(k)&&nu[k]===tg[i]);
+    if(j!==undefined){next.set(i,j);claimed.add(j)}});
+  const out=[];
+  ord.forEach(i=>{if(!tg[i]||claimed.has(i))return;
+    const hops=[];for(let k=i;k!==undefined;k=next.get(k))hops.push(k);
+    const last=hops[hops.length-1],urls=hops.map(k=>nu[k]??entries[k].url);if(tg[last])urls.push(tg[last]);
+    let loop=null,loopAt=-1;const seen=new Set();
+    for(let n=0;n<urls.length;n++){if(seen.has(urls[n])){loop=urls[n];loopAt=n;break}seen.add(urls[n])}
+    out.push({hops,urls,tail:tg[last]||null,n:hops.filter(k=>tg[k]).length,loop,loopAt})});
+  return out;
+}
+function chainHTML(c){
+  const MAX=12,items=c.hops.map((k,n)=>({k,n})),pc=s=>s>=400||s===0?'bad':s>=300?'info':'ok';
+  const shown=items.slice(0,MAX),more=items.length-shown.length;
+  const uHTML=u=>{try{const x=new URL(u);return `<small>${x.protocol==='http:'?'http://':''}${esc(x.host)}</small> ${esc(x.pathname+x.search)}`}catch{return esc(u)}};
+  const rep=n=>c.loop&&n===c.loopAt?' <span class="pill bad">repeat</span>':'';
+  const li=shown.map(({k,n})=>{const x=entries[k];return `<li class="hop${c.loop&&n===c.loopAt?' rep':''}" data-i="${k}" tabindex="0" title="${esc(x.url)}"><span class="arr">${n?'↳':'•'}</span><span class="pill ${pc(x.status)}">${x.status||'ERR'}</span><span class="u">${uHTML(x.url)}</span>${rep(n)}</li>`}).join('')
+    +(more?`<li class="hop more"><span class="arr">⋮</span><span class="u">${more} more hop${more>1?'s':''}</span></li>`:'')
+    +(c.tail&&!more?`<li class="hop ghost${c.loop&&c.loopAt===c.hops.length?' rep':''}" title="${esc(c.tail)}"><span class="arr">↳</span><span class="pill">not in HAR</span><span class="u">${uHTML(c.tail)}</span>${rep(c.hops.length)}</li>`:'');
+  const head=c.loop?`Redirect loop · ${esc(shortU(c.loop))} repeats after ${c.loopAt} hop${c.loopAt>1?'s':''}`:`${c.n} redirects · ${esc(shortU(c.urls[0]))} → ${esc(shortU(c.urls[c.urls.length-1]))}`;
+  const why=c.loop?'The browser keeps bouncing until it gives up (ERR_TOO_MANY_REDIRECTS). Click a hop to see the Location header that sent it on.':'Click a hop to see its headers and timing.';
+  return `<div class="chain ${c.loop?'bad':'warn'}"><b>${head}</b><span class="why">${why}</span><ol class="hops">${li}</ol></div>`;
 }
 
 // One row per host: request count, failures (4xx/5xx/status 0), error rate and summed request time. Worst hosts first.
@@ -221,6 +273,7 @@ function render(){
   </div>
   <h3 class="sec">Findings</h3>
   <div class="findings">${a.F.map(([k,t,d])=>`<div class="finding ${k}"><div><b>${esc(t)}</b><span>${esc(d)}</span></div></div>`).join('')}</div>
+  ${a.rc.length?`<h3 class="sec">Redirect chains · ${a.rc.length}</h3><div class="chains">${a.rc.map(chainHTML).join('')}</div>`:''}
   <h3 class="sec">Hosts · ${hs.length}</h3>
   <div class="tablewrap hostwrap"><table id="hosts"><thead><tr><th>Host</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num opt">Total time</th></tr></thead><tbody>${hs.map(h=>{const pc=h.err?(h.rate>=.5?'bad':'warn'):'ok';
     return `<tr class="h ${hostF===h.host?'sel':''}" data-h="${esc(h.host)}" tabindex="0" title="${hostF===h.host?'Click to show all hosts':'Click to filter requests to this host'}"><td class="host">${hostName(h.host)}</td><td class="num">${h.n}</td><td class="num">${h.err?`<span class="pill ${pc}">${h.err}</span>`:'<span style="color:var(--dim)">0</span>'}</td><td class="num">${Math.round(h.rate*100)}%</td><td class="num opt">${fmtMs(h.time)}</td></tr>`}).join('')}</tbody></table></div>
@@ -235,6 +288,8 @@ function render(){
   const pick=h=>{hostF=hostF===h?null:h;render();$('#q').scrollIntoView({block:'nearest'})};
   document.querySelectorAll('tr.h').forEach(r=>{r.onclick=()=>pick(r.dataset.h);r.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick(r.dataset.h)}}});
   const hc=$('#hostClear');if(hc)hc.onclick=()=>{hostF=null;render()};
+  const hop=k=>{selected=k;drawRows();detail(entries[k])};
+  document.querySelectorAll('.hop[data-i]').forEach(h=>{h.onclick=()=>hop(+h.dataset.i);h.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();hop(+h.dataset.i)}}});
 }
 
 // Every space-separated term must match the URL, the method or the status. "5xx" style terms match a status class; "err" matches status 0.
@@ -271,6 +326,7 @@ function summary(){
   const a=analyze(),red=$('#redact').value==='1',U=x=>red?x.host+x.path.split('?')[0]:x.url;
   const L=['**HAR summary**',`- ${entries.length} requests, ${a.fail.length} failed, ${a.slowL.length} slow (≥ ${$('#slow').value} ms)`,'','**Findings**',...a.F.map(f=>`- ${f[1]}: ${f[2]}`)];
   if(a.fail.length){L.push('','**Failed requests**');a.fail.slice(0,10).forEach(x=>L.push(`- \`${x.status||'ERR'} ${x.method} ${U(x)}\` at ${x.e.startedDateTime}${hdr(x.e.response?.headers,'x-request-id')?' (request id '+hdr(x.e.response.headers,'x-request-id')+')':''}`))}
+  if(a.rc.length){const RU=u=>red?shortU(u):u;L.push('','**Redirect chains**');a.rc.slice(0,5).forEach(c=>{const hs=c.urls.slice(0,12).map(u=>'`'+RU(u)+'`');L.push(`- ${c.loop?'Loop, repeats after '+c.loopAt+' hop'+(c.loopAt>1?'s':''):c.n+' redirects'}: ${hs.join(' → ')}${c.urls.length>12?' → …':''}`)})}
   if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
   return L.join('\n');
 }
@@ -281,7 +337,7 @@ function makeSample(){
   const mk=(method,url,status,mime,size,tm,extra={})=>{off+=extra.gap??40;const timings={blocked:2,dns:extra.dns||-1,connect:extra.conn||-1,ssl:extra.ssl||-1,send:1,wait:tm.wait,receive:tm.recv};
     const time=Object.values(timings).reduce((s,v)=>s+(v>0?v:0),0);
     return {startedDateTime:new Date(base+off).toISOString(),time,request:{method,url,httpVersion:'h2',headers:H({accept:'*/*','user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0',...(extra.reqH||{})}),queryString:[],cookies:[],headersSize:-1,bodySize:0},
-      response:{status,statusText:extra.st||'',httpVersion:'h2',headers:H({'content-type':mime,...(extra.resH||{})}),cookies:[],content:{size,mimeType:mime,...(extra.body?{text:extra.body}:{})},redirectURL:'',headersSize:-1,bodySize:size,_transferSize:size},
+      response:{status,statusText:extra.st||'',httpVersion:'h2',headers:H({'content-type':mime,...(extra.loc?{location:extra.loc}:{}),...(extra.resH||{})}),cookies:[],content:{size,mimeType:mime,...(extra.body?{text:extra.body}:{})},redirectURL:extra.loc||'',headersSize:-1,bodySize:size,_transferSize:size},
       cache:{},timings,serverIPAddress:extra.ip||'104.18.22.61',_resourceType:extra.rt||''}};
   const E=[
     mk('GET','https://app.acmecloud.io/dashboard',200,'text/html',18432,{wait:180,recv:12},{dns:24,conn:31,ssl:42,st:'OK',rt:'document',gap:0}),
@@ -302,6 +358,13 @@ function makeSample(){
     mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script'}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',resH:{'x-request-id':'req_7Hc2P8kRr'}}),
     mk('GET','http://cdn.legacy-widgets.net/badge.js',200,'application/javascript',8120,{wait:210,recv:8},{rt:'script',dns:44,conn:61,ip:'93.184.216.34'}),
+    // Customer clicks Reports and gets bounced through SSO and back again: a login redirect loop.
+    mk('GET','https://app.acmecloud.io/reports/weekly',302,'text/html',0,{wait:48,recv:1},{rt:'document',st:'Found',gap:900,loc:'/login?next=%2Freports%2Fweekly'}),
+    mk('GET','https://app.acmecloud.io/login?next=%2Freports%2Fweekly',302,'text/html',0,{wait:36,recv:1},{rt:'document',st:'Found',gap:60,loc:'https://sso.acmecloud.io/oauth/authorize?client_id=web&redirect_uri=https%3A%2F%2Fapp.acmecloud.io%2Fauth%2Fcallback'}),
+    mk('GET','https://sso.acmecloud.io/oauth/authorize?client_id=web&redirect_uri=https%3A%2F%2Fapp.acmecloud.io%2Fauth%2Fcallback',302,'text/html',0,{wait:92,recv:1},{rt:'document',st:'Found',gap:50,dns:19,conn:24,ssl:33,ip:'104.18.23.9',loc:'https://app.acmecloud.io/auth/callback?code=c_9f2Kx1'}),
+    mk('GET','https://app.acmecloud.io/auth/callback?code=c_9f2Kx1',302,'text/html',0,{wait:118,recv:1},{rt:'document',st:'Found',gap:150,loc:'/reports/weekly'}),
+    mk('GET','https://app.acmecloud.io/reports/weekly',302,'text/html',0,{wait:44,recv:1},{rt:'document',st:'Found',gap:130,loc:'/login?next=%2Freports%2Fweekly'}),
+    mk('GET','https://app.acmecloud.io/login?next=%2Freports%2Fweekly',302,'text/html',0,{wait:39,recv:1},{rt:'document',st:'Found',gap:60,loc:'https://sso.acmecloud.io/oauth/authorize?client_id=web&redirect_uri=https%3A%2F%2Fapp.acmecloud.io%2Fauth%2Fcallback'}),
   ];
   return JSON.stringify({log:{version:'1.2',creator:{name:'Sample generator',version:'1.0'},pages:[],entries:E}},null,2);
 }
