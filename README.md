@@ -13,6 +13,7 @@ Drop in a browser HAR export and see what failed, what was slow and the likely c
 - **Filterable request table** with a waterfall, plus a detail view for headers, timing breakdown and response body. Cookies and auth headers are masked
 - **Search requests** by URL, method or status as you type. It stacks with the type chips, so `errors` + `invoices` finds the failing billing call in a second. Status classes like `5xx` work, and press `/` to jump to the box or `Esc` to clear it
 - **Copy summary for ticket** writes a Markdown summary with failed requests, timestamps and request IDs, ready for a Jira or Zendesk escalation
+- **Download CSV** of every failed and slow request: the finding (5xx, auth, 429, status 0, slow…), status, method, URL, time, server wait, request ID and start time, in the order they happened. Attach it to the ticket so engineering can match rows against their logs. It follows the same redaction setting as the summary, and cells that a spreadsheet would treat as formulas are neutralised
 - **Private by design.** No backend; the file never leaves the browser
 
 ## How it works
