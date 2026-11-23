@@ -127,7 +127,7 @@ button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
 <div class="wrap">
   <header class="top">
     <div class="brand"><div class="mark">HAR</div><div><h1>HAR Analyzer</h1><p class="tag">Drop in a browser network export. See what failed, what was slow and the likely cause.</p></div></div>
-    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button class="ghost" id="clear">Clear</button></div>
+    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button id="csv" disabled title="Failed and slow requests with status, timing, request ID and start time">Download CSV</button><button class="ghost" id="clear">Clear</button></div>
   </header>
 
   <div class="grid">
@@ -139,7 +139,7 @@ button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
         <textarea id="raw" spellcheck="false" placeholder='{"log":{"entries":[ ... ]}}'></textarea>
         <div class="row" style="margin-top:10px">
           <div><label class="f">Slow threshold (ms)</label><input type="number" id="slow" value="1000" min="50" step="50"></div>
-          <div><label class="f">Redact in summary</label><select id="redact"><option value="1">Strip query strings</option><option value="0">Keep full URLs</option></select></div>
+          <div><label class="f">Redact in summary &amp; CSV</label><select id="redact"><option value="1">Strip query strings</option><option value="0">Keep full URLs</option></select></div>
         </div>
         <p class="note">How to get a HAR: open DevTools → Network → reproduce the issue → right-click any request → <em>Save all as HAR</em>. HAR files can contain cookies and tokens. This page never uploads them.</p>
       </div>
@@ -188,9 +188,9 @@ function load(text){
   const t0=Math.min(...list.map(e=>Date.parse(e.startedDateTime)||0));
   entries=list.map((e,i)=>{const st=(Date.parse(e.startedDateTime)||t0)-t0;const u=(()=>{try{return new URL(e.request.url)}catch{return null}})();
     return {i,e,start:st,time:e.time??0,status:e.response?.status??0,method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
-  selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;
+  selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
 }
-function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true}
+function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true;$('#csv').disabled=true}
 
 function analyze(){
   const slow=+$('#slow').value||1000,F=[];
@@ -331,6 +331,33 @@ function summary(){
   return L.join('\n');
 }
 
+// CSV of every failed or slow request, in the order they happened, for attaching to a ticket.
+// Cells that a spreadsheet would read as a formula (=, +, -, @, tab, CR) get a leading ' so a crafted HAR can't run one.
+function csvCell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
+function findingOf(x,slowSet){
+  const s=x.status,r=[];
+  if(s===0)r.push('No response (status 0)');else if(s>=500)r.push('Server error (5xx)');else if(s===401||s===403)r.push('Auth failure (401/403)');else if(s===429)r.push('Rate limited (429)');else if(s===404)r.push('Not found (404)');else if(s>=400)r.push('Client error (4xx)');
+  if(slowSet.has(x))r.push('Slow (≥ '+(+$('#slow').value||1000)+' ms)');
+  return r.join('; ');
+}
+function issuesCSV(){
+  const a=analyze(),red=$('#redact').value==='1',slowSet=new Set(a.slowL);
+  const rows=[...new Set([...a.fail,...a.slowL])].sort((p,q)=>p.start-q.start||p.i-q.i);
+  const head=['Finding','Status','Method','URL','Time (ms)','Server wait (ms)','Request ID','Started'];
+  const lines=rows.map(x=>{const rh=x.e.response?.headers,w=x.e.timings?.wait;
+    return [findingOf(x,slowSet),x.status||'ERR',x.method,red?x.host+x.path.split('?')[0]:x.url,x.status===0&&!(x.time>0)?'':Math.round(Math.max(0,x.time||0)),w>=0?Math.round(w):'',hdr(rh,'x-request-id')||hdr(rh,'cf-ray'),x.e.startedDateTime||''].map(csvCell).join(',')});
+  return {n:rows.length,text:'\ufeff'+[head.join(','),...lines].join('\r\n')+'\r\n'};
+}
+function downloadCSV(){
+  if(!entries.length)return toast('This HAR has no requests to export');
+  const {n,text}=issuesCSV();
+  if(!n)return toast('Nothing failed or was slow, so there\'s nothing to export');
+  const t=Date.parse(entries.slice().sort((p,q)=>p.start-q.start)[0].e.startedDateTime),iso=isNaN(t)?'':new Date(t).toISOString(),stamp=iso?'-'+iso.slice(0,10)+'-'+iso.slice(11,16).replace(':',''):'';
+  const url=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');
+  a.href=url;a.download='har-failed-slow'+stamp+'.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  toast(`Downloaded ${n} request${n>1?'s':''} as CSV`);
+}
+
 function makeSample(){
   const base=Date.parse('2026-11-18T17:42:10.000Z');let off=0;
   const H=(o)=>Object.entries(o).map(([name,value])=>({name,value}));
@@ -370,8 +397,9 @@ function makeSample(){
 }
 
 $('#sample').onclick=()=>{const s=makeSample();$('#raw').value=s;load(s);toast('Loaded a sample HAR from a fake SaaS dashboard')};
-$('#clear').onclick=()=>{entries=[];query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
+$('#clear').onclick=()=>{entries=[];query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
 $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());toast('Summary copied as Markdown')}catch{toast('Clipboard blocked by the browser')}};
+$('#csv').onclick=downloadCSV;
 $('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
 $('#slow').oninput=()=>render();
 let deb;$('#raw').oninput=()=>{clearTimeout(deb);deb=setTimeout(()=>{const v=$('#raw').value.trim();if(v)load(v)},400)};
