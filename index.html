@@ -120,14 +120,21 @@ button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
 .hop.rep .u{color:var(--bad)}
 .hop.ghost{cursor:default;color:var(--muted)}.hop.ghost:hover{background:none}
 .hop.more{cursor:default;color:var(--dim)}.hop.more:hover{background:none}
-@media (max-width:600px){.hop{align-items:flex-start}.hop .u{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}}
+.probs{list-style:none;margin:0 0 8px;padding:0;display:flex;flex-direction:column;gap:5px}
+.probs li{display:flex;gap:8px;align-items:baseline;font-size:13px;min-width:0}
+.probs li .pill{flex:none}
+.probs li>span:last-child{min-width:0;overflow-wrap:anywhere}
+.cors>b{overflow-wrap:anywhere}
+.chain .lbl{display:block;font:600 11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:8px 0 4px}
+.chain pre.out{max-height:none;padding:9px 11px}
+@media (max-width:600px){.hop{align-items:flex-start}.hop .u{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}.cors .hop .u{-webkit-line-clamp:3}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
     <div class="brand"><div class="mark">HAR</div><div><h1>HAR Analyzer</h1><p class="tag">Drop in a browser network export. See what failed, what was slow and the likely cause.</p></div></div>
-    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button id="csv" disabled title="Failed and slow requests with status, timing, request ID and start time">Download CSV</button><button class="ghost" id="clear">Clear</button></div>
+    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button id="csv" disabled title="Failed, slow and CORS-blocked requests with status, timing, request ID and start time">Download CSV</button><button class="ghost" id="clear">Clear</button></div>
   </header>
 
   <div class="grid">
@@ -196,12 +203,14 @@ function analyze(){
   const slow=+$('#slow').value||1000,F=[];
   const fail=entries.filter(x=>x.status>=400||x.status===0);
   const s5=entries.filter(x=>x.status>=500),s4=entries.filter(x=>x.status>=400&&x.status<500),s0=entries.filter(x=>x.status===0);
-  const auth=s4.filter(x=>x.status===401||x.status===403),nf=s4.filter(x=>x.status===404),rl=s4.filter(x=>x.status===429);
+  const cors=corsPreflights(),cf=cors.filter(c=>c.probs.length),blockedN=cf.filter(c=>c.blocked!==null&&entries[c.blocked].status===0).length;
+  const auth=s4.filter(x=>(x.status===401||x.status===403)&&!isPreflight(x)),nf=s4.filter(x=>x.status===404),rl=s4.filter(x=>x.status===429);
   const slowL=entries.filter(x=>x.time>=slow&&x.status!==0);
   const ttfb=entries.filter(x=>(x.e.timings?.wait||0)>=Math.min(800,slow*.8));
   const by=a=>[...new Set(a.map(x=>x.host))].join(', ');
   if(s5.length)F.push(['bad',`${s5.length} server error${s5.length>1?'s':''} (5xx)`,`The server failed to handle these requests (${by(s5)}). That points to the backend, not the customer's browser. Escalate to engineering with the timestamps and request IDs.`]);
-  if(s0.length)F.push(['bad',`${s0.length} request${s0.length>1?'s':''} never got a response (status 0)`,`Usually CORS blocking, an ad blocker or extension, a firewall or proxy, or the request was cancelled by navigation. Check the console for CORS errors and retry in an incognito window.`]);
+  if(s0.length)F.push(['bad',`${s0.length} request${s0.length>1?'s':''} never got a response (status 0)`,`Usually CORS blocking, an ad blocker or extension, a firewall or proxy, or the request was cancelled by navigation. Check the console for CORS errors and retry in an incognito window.`+(blockedN?` ${blockedN===s0.length?(s0.length>1?'All of them':'It'):blockedN+' of them'} followed a failed CORS preflight, so CORS is confirmed for ${blockedN>1?'those':'that one'}.`:'')]);
+  if(cf.length){const c=cf[0],b=c.blocked!==null?entries[c.blocked]:null;F.push(['bad',`${cf.length} CORS preflight failure${cf.length>1?'s':''}`,`The preflight for ${c.reqM||'the request'} ${shortU(c.x.url)} from ${c.origin||'an unknown origin'} failed: ${c.probs.map(p=>p.short).join('; ')}. ${b&&b.status===0?`The browser then blocked the ${b.method} (status 0).`:b?`The ${b.method} that followed got ${b.status}.`:`The ${c.reqM||'real request'} was never sent.`} The API needs to ${c.need}.${cf.length>1?` ${cf.length-1} more below.`:''} The exact headers to return are listed under CORS preflights.`])}
   const rc=redirectChains().filter(c=>c.loop||c.n>=3).sort((p,q)=>(!!q.loop-!!p.loop)||q.n-p.n);
   const loops=rc.filter(c=>c.loop),longC=rc.filter(c=>!c.loop);
   if(loops.length){const c=loops[0];F.push(['bad',`${loops.length} redirect loop${loops.length>1?'s':''}`,`${shortU(c.loop)} redirected back to itself after ${c.loopAt} hop${c.loopAt>1?'s':''}, so the page never loads. Usually the login session isn't sticking (a cookie rejected for its domain or SameSite, or blocked third-party cookies) or two rules bounce between each other (http ↔ https, www ↔ bare domain, trailing slash). The chain is shown below.`])}
@@ -212,7 +221,57 @@ function analyze(){
   if(slowL.length)F.push(['warn',`${slowL.length} slow request${slowL.length>1?'s':''} (≥ ${fmtMs(slow)})`,`Slowest: ${slowL.slice().sort((a,b)=>b.time-a.time).slice(0,2).map(x=>x.path.split('?')[0]+' ('+fmtMs(x.time)+')').join(', ')}.`+(ttfb.length?` Most of that time is server wait (TTFB), so the backend is slow rather than the network.`:'')]);
   const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
   if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
-  return {F,fail,slowL,s4,s5,s0,rc};
+  return {F,fail,slowL,s4,s5,s0,rc,cors,cf};
+}
+
+// CORS preflights: an OPTIONS with Access-Control-Request-Method (or Chrome's "preflight" type) is checked the way the browser would:
+// 2xx status, an Allow-Origin that matches the page origin, the requested method and every requested header allowed.
+// Each is linked to the next captured request for the same URL and method, which is the call it gated.
+const SAFE_M=new Set(['GET','HEAD','POST']);
+function isPreflight(x){return x.method==='OPTIONS'&&(!!hdr(x.e.request.headers,'access-control-request-method')||(x.e._resourceType||'').toLowerCase()==='preflight')}
+function hlist(v){return String(v||'').split(',').map(s=>s.trim()).filter(Boolean)}
+function corsPreflights(){
+  const ord=entries.map((x,i)=>i).sort((p,q)=>entries[p].start-entries[q].start||p-q),pos=new Map(ord.map((k,n)=>[k,n])),claimed=new Set(),out=[];
+  ord.forEach(i=>{const x=entries[i];if(!isPreflight(x))return;
+    const rq=x.e.request.headers,rs=x.e.response?.headers||[];
+    let origin=hdr(rq,'origin').trim();if(!origin||origin==='null'){try{origin=new URL(hdr(rq,'referer')).origin}catch{origin=origin||''}}
+    const reqM=hdr(rq,'access-control-request-method').trim().toUpperCase(),reqH=hlist(hdr(rq,'access-control-request-headers').toLowerCase());
+    const acao=hdr(rs,'access-control-allow-origin').trim(),rawM=hdr(rs,'access-control-allow-methods'),rawH=hdr(rs,'access-control-allow-headers');
+    const acam=hlist(rawM.toUpperCase()),acah=hlist(rawH.toLowerCase()),probs=[],needs=[];
+    const O=origin||'the page origin';
+    if(x.status===0){probs.push({short:'no response (status 0)',long:'The OPTIONS request itself got no response, so the browser never learned what the API allows. Usually a proxy, WAF or load balancer dropping OPTIONS, or the API host being unreachable.'});needs.push('answer OPTIONS at all')}
+    else{
+      if(!(x.status>=200&&x.status<300)){probs.push({short:'returned '+x.status,long:`The preflight came back ${x.status}${x.e.response?.statusText?' '+x.e.response.statusText:''}. Browsers only accept a 2xx (normally 204), so the route isn't handling OPTIONS, or auth or a WAF runs before the CORS middleware.`});needs.push('return 204 to OPTIONS without requiring auth')}
+      if(!acao){probs.push({short:'no Access-Control-Allow-Origin',long:`Access-Control-Allow-Origin is missing. It has to be ${O} (or *).`});needs.push('send Access-Control-Allow-Origin: '+O)}
+      else if(acao.includes(',')||acao.includes(' ')){probs.push({short:'Allow-Origin lists more than one origin',long:`Access-Control-Allow-Origin is "${acao}". Browsers accept exactly one origin, so the server should echo back the one that matches.`});needs.push('send Access-Control-Allow-Origin: '+O)}
+      else if(acao!=='*'&&origin&&acao!==origin){probs.push({short:`Allow-Origin is ${acao}, not ${origin}`,long:`Access-Control-Allow-Origin is ${acao}, but the page is on ${origin}. It has to match exactly, including scheme and port.`});needs.push('send Access-Control-Allow-Origin: '+origin)}
+      if(reqM&&!SAFE_M.has(reqM)&&!acam.includes(reqM)&&!acam.includes('*')){probs.push({short:'Allow-Methods missing '+reqM,long:`Access-Control-Allow-Methods ${rawM?'is "'+rawM+'", which':'is missing, so it'} doesn't include ${reqM}.`});needs.push('allow the '+reqM+' method')}
+      const miss=reqH.filter(h=>!acah.includes(h)&&!(acah.includes('*')&&h!=='authorization'));
+      if(miss.length){probs.push({short:'Allow-Headers missing '+miss.join(', '),long:`Access-Control-Allow-Headers ${rawH?'is "'+rawH+'", which':'is missing, so it'} doesn't allow ${miss.join(', ')}.${acah.includes('*')&&miss.includes('authorization')?' A * there never covers Authorization; it has to be listed by name.':''}`});needs.push('allow the '+miss.join(', ')+' header'+(miss.length>1?'s':''))}
+    }
+    let blocked=null;if(reqM){const nu=normU(x.url),j=ord.find(k=>pos.get(k)>pos.get(i)&&!claimed.has(k)&&entries[k].method===reqM&&normU(entries[k].url)===nu);if(j!==undefined){blocked=j;claimed.add(j)}}
+    const fix=[];if(probs.length){
+      if(x.status<200||x.status>=300)fix.push('HTTP/1.1 204 No Content');
+      const okO=acao&&!acao.includes(',')&&!acao.includes(' ')&&(acao==='*'||!origin||acao===origin);
+      fix.push('Access-Control-Allow-Origin: '+(okO?acao:origin||'<your app origin>'));
+      const ms=[...acam];if(reqM&&!ms.includes(reqM)&&!ms.includes('*'))ms.push(reqM);if(ms.length)fix.push('Access-Control-Allow-Methods: '+ms.join(', '));
+      const hs=[...acah];reqH.forEach(h=>{if(!hs.includes(h))hs.push(h)});if(hs.length)fix.push('Access-Control-Allow-Headers: '+hs.join(', '));
+      if(!okO||acao!=='*')fix.push('Vary: Origin');
+    }
+    const need=needs.length>1?needs.slice(0,-1).join(', ')+' and '+needs[needs.length-1]:needs[0]||'';
+    out.push({i,x,origin,reqM,reqH,probs,blocked,fix,need});
+  });
+  return out;
+}
+function corsHTML(c){
+  const b=c.blocked!==null?entries[c.blocked]:null,pc=s=>s>=400||s===0?'bad':s>=300?'info':'ok';
+  const pHTML=u=>{try{const x=new URL(u);return esc(x.pathname+x.search)}catch{return esc(u)}};
+  const hop=(x,k,arr,tag)=>`<li class="hop" data-i="${k}" tabindex="0" title="${esc(x.url)}"><span class="arr">${arr}</span><span class="pill ${pc(x.status)}">${x.status||'ERR'}</span><span class="u"><b class="mono" style="font-weight:600">${esc(x.method)}</b> ${pHTML(x.url)}</span>${tag}</li>`;
+  const tail=b?hop(b,c.blocked,'↳',b.status===0?'<span class="pill bad">blocked</span>':''):`<li class="hop ghost"><span class="arr">↳</span><span class="pill">not in HAR</span><span class="u">The ${esc(c.reqM||'real request')} was never sent</span></li>`;
+  return `<div class="chain bad cors"><b>CORS preflight failed · ${esc(c.reqM||'?')} ${esc(shortU(c.x.url))}</b><span class="why">From ${c.origin?'<span class="mono">'+esc(c.origin)+'</span>':'an unknown origin'}${c.reqH.length?'. Requested headers: <span class="mono">'+esc(c.reqH.join(', '))+'</span>':''}</span>
+  <ul class="probs">${c.probs.map(p=>`<li><span class="pill bad">✕</span><span>${esc(p.long)}</span></li>`).join('')}</ul>
+  <ol class="hops">${hop(c.x,c.i,'•','<span class="pill">preflight</span>')}${tail}</ol>
+  <span class="lbl">The OPTIONS response should include</span><pre class="out">${esc(c.fix.join('\n'))}</pre></div>`;
 }
 
 // Redirect chains: each 3xx is linked to the next captured request for its redirectURL / Location target.
@@ -273,6 +332,7 @@ function render(){
   </div>
   <h3 class="sec">Findings</h3>
   <div class="findings">${a.F.map(([k,t,d])=>`<div class="finding ${k}"><div><b>${esc(t)}</b><span>${esc(d)}</span></div></div>`).join('')}</div>
+  ${a.cf.length?`<h3 class="sec">CORS preflights · ${a.cf.length} failed of ${a.cors.length}</h3><div class="chains">${a.cf.map(corsHTML).join('')}</div>`:''}
   ${a.rc.length?`<h3 class="sec">Redirect chains · ${a.rc.length}</h3><div class="chains">${a.rc.map(chainHTML).join('')}</div>`:''}
   <h3 class="sec">Hosts · ${hs.length}</h3>
   <div class="tablewrap hostwrap"><table id="hosts"><thead><tr><th>Host</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num opt">Total time</th></tr></thead><tbody>${hs.map(h=>{const pc=h.err?(h.rate>=.5?'bad':'warn'):'ok';
@@ -326,6 +386,7 @@ function summary(){
   const a=analyze(),red=$('#redact').value==='1',U=x=>red?x.host+x.path.split('?')[0]:x.url;
   const L=['**HAR summary**',`- ${entries.length} requests, ${a.fail.length} failed, ${a.slowL.length} slow (≥ ${$('#slow').value} ms)`,'','**Findings**',...a.F.map(f=>`- ${f[1]}: ${f[2]}`)];
   if(a.fail.length){L.push('','**Failed requests**');a.fail.slice(0,10).forEach(x=>L.push(`- \`${x.status||'ERR'} ${x.method} ${U(x)}\` at ${x.e.startedDateTime}${hdr(x.e.response?.headers,'x-request-id')?' (request id '+hdr(x.e.response.headers,'x-request-id')+')':''}`))}
+  if(a.cf.length){L.push('','**CORS preflight failures**');a.cf.slice(0,5).forEach(c=>{const b=c.blocked!==null?entries[c.blocked]:null;L.push(`- \`OPTIONS ${U(c.x)}\` for ${c.reqM||'?'} from ${c.origin||'unknown origin'}: ${c.probs.map(p=>p.short).join('; ')}. ${b?(b.status===0?'Blocked the '+b.method+' (status 0)':'The '+b.method+' got '+b.status):'The '+(c.reqM||'real request')+' was never sent'}. Needs: ${c.fix.map(l=>l.startsWith('HTTP/')?'a 204 status':l).join(' / ')}`)})}
   if(a.rc.length){const RU=u=>red?shortU(u):u;L.push('','**Redirect chains**');a.rc.slice(0,5).forEach(c=>{const hs=c.urls.slice(0,12).map(u=>'`'+RU(u)+'`');L.push(`- ${c.loop?'Loop, repeats after '+c.loopAt+' hop'+(c.loopAt>1?'s':''):c.n+' redirects'}: ${hs.join(' → ')}${c.urls.length>12?' → …':''}`)})}
   if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
   return L.join('\n');
@@ -334,18 +395,20 @@ function summary(){
 // CSV of every failed or slow request, in the order they happened, for attaching to a ticket.
 // Cells that a spreadsheet would read as a formula (=, +, -, @, tab, CR) get a leading ' so a crafted HAR can't run one.
 function csvCell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
-function findingOf(x,slowSet){
-  const s=x.status,r=[];
-  if(s===0)r.push('No response (status 0)');else if(s>=500)r.push('Server error (5xx)');else if(s===401||s===403)r.push('Auth failure (401/403)');else if(s===429)r.push('Rate limited (429)');else if(s===404)r.push('Not found (404)');else if(s>=400)r.push('Client error (4xx)');
+function findingOf(x,slowSet,cmap){
+  const s=x.status,r=[],pf=cmap?.get(x.i);
+  if(pf?.pre)r.push((s===0?'No response (status 0); ':'')+'CORS preflight failed: '+pf.pre.probs.map(p=>p.short).join('; '));
+  else if(s===0)r.push('No response (status 0)'+(pf?.by?'; Blocked by failed CORS preflight':''));else if(s>=500)r.push('Server error (5xx)');else if(s===401||s===403)r.push('Auth failure (401/403)');else if(s===429)r.push('Rate limited (429)');else if(s===404)r.push('Not found (404)');else if(s>=400)r.push('Client error (4xx)');
   if(slowSet.has(x))r.push('Slow (≥ '+(+$('#slow').value||1000)+' ms)');
   return r.join('; ');
 }
 function issuesCSV(){
-  const a=analyze(),red=$('#redact').value==='1',slowSet=new Set(a.slowL);
-  const rows=[...new Set([...a.fail,...a.slowL])].sort((p,q)=>p.start-q.start||p.i-q.i);
+  const a=analyze(),red=$('#redact').value==='1',slowSet=new Set(a.slowL),cmap=new Map();
+  a.cf.forEach(c=>{cmap.set(c.i,{pre:c});if(c.blocked!==null)cmap.set(c.blocked,{by:c})});
+  const rows=[...new Set([...a.fail,...a.slowL,...a.cf.map(c=>c.x)])].sort((p,q)=>p.start-q.start||p.i-q.i);
   const head=['Finding','Status','Method','URL','Time (ms)','Server wait (ms)','Request ID','Started'];
   const lines=rows.map(x=>{const rh=x.e.response?.headers,w=x.e.timings?.wait;
-    return [findingOf(x,slowSet),x.status||'ERR',x.method,red?x.host+x.path.split('?')[0]:x.url,x.status===0&&!(x.time>0)?'':Math.round(Math.max(0,x.time||0)),w>=0?Math.round(w):'',hdr(rh,'x-request-id')||hdr(rh,'cf-ray'),x.e.startedDateTime||''].map(csvCell).join(',')});
+    return [findingOf(x,slowSet,cmap),x.status||'ERR',x.method,red?x.host+x.path.split('?')[0]:x.url,x.status===0&&!(x.time>0)?'':Math.round(Math.max(0,x.time||0)),w>=0?Math.round(w):'',hdr(rh,'x-request-id')||hdr(rh,'cf-ray'),x.e.startedDateTime||''].map(csvCell).join(',')});
   return {n:rows.length,text:'\ufeff'+[head.join(','),...lines].join('\r\n')+'\r\n'};
 }
 function downloadCSV(){
@@ -384,6 +447,12 @@ function makeSample(){
     mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
     mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script'}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',resH:{'x-request-id':'req_7Hc2P8kRr'}}),
+    // Saving org settings: the API's preflight doesn't allow PATCH or the custom client header, so the browser blocks the call.
+    mk('OPTIONS','https://api.acmecloud.io/v2/orgs/org_northwind/settings',204,'',0,{wait:34,recv:1},{rt:'preflight',st:'No Content',gap:700,reqH:{origin:'https://app.acmecloud.io','access-control-request-method':'PATCH','access-control-request-headers':'authorization,content-type,x-acme-client'},resH:{'access-control-allow-origin':'https://app.acmecloud.io','access-control-allow-methods':'GET, POST, PUT, DELETE','access-control-allow-headers':'authorization, content-type','access-control-max-age':'600',vary:'Origin'}}),
+    mk('PATCH','https://api.acmecloud.io/v2/orgs/org_northwind/settings',0,'',0,{wait:-1,recv:-1},{rt:'fetch',gap:6,ip:'',reqH:{origin:'https://app.acmecloud.io','content-type':'application/json','x-acme-client':'web/4.12.0'}}),
+    // Avatar upload: the uploads host doesn't route OPTIONS at all (405, no CORS headers).
+    mk('OPTIONS','https://uploads.acmecloud.io/v1/avatars',405,'text/plain',18,{wait:27,recv:1},{rt:'preflight',st:'Method Not Allowed',gap:500,dns:20,conn:26,ssl:35,ip:'104.18.24.12',reqH:{origin:'https://app.acmecloud.io','access-control-request-method':'POST','access-control-request-headers':'authorization'},resH:{allow:'POST'},body:'Method Not Allowed'}),
+    mk('POST','https://uploads.acmecloud.io/v1/avatars',0,'',0,{wait:-1,recv:-1},{rt:'fetch',gap:4,ip:'',reqH:{origin:'https://app.acmecloud.io','content-type':'multipart/form-data; boundary=----acme'}}),
     mk('GET','http://cdn.legacy-widgets.net/badge.js',200,'application/javascript',8120,{wait:210,recv:8},{rt:'script',dns:44,conn:61,ip:'93.184.216.34'}),
     // Customer clicks Reports and gets bounced through SSO and back again: a login redirect loop.
     mk('GET','https://app.acmecloud.io/reports/weekly',302,'text/html',0,{wait:48,recv:1},{rt:'document',st:'Found',gap:900,loc:'/login?next=%2Freports%2Fweekly'}),
