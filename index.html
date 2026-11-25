@@ -127,6 +127,10 @@ button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
 .cors>b{overflow-wrap:anywhere}
 .chain .lbl{display:block;font:600 11px var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:8px 0 4px}
 .chain pre.out{max-height:none;padding:9px 11px}
+tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)}tr.z:focus{outline:none}
+#sizes td.url{max-width:210px}#sizes th{white-space:nowrap}
+.save{color:var(--warn)}
+@media (max-width:600px){#sizes .opt{display:none}#sizes th,#sizes td{padding:6px 6px}#sizes td.url{max-width:130px}#sizes td.url small{display:none}#sizes th{white-space:normal}}
 @media (max-width:600px){.hop{align-items:flex-start}.hop .u{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}.cors .hop .u{-webkit-line-clamp:3}}
 </style>
 </head>
@@ -146,8 +150,9 @@ button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
         <textarea id="raw" spellcheck="false" placeholder='{"log":{"entries":[ ... ]}}'></textarea>
         <div class="row" style="margin-top:10px">
           <div><label class="f">Slow threshold (ms)</label><input type="number" id="slow" value="1000" min="50" step="50"></div>
-          <div><label class="f">Redact in summary &amp; CSV</label><select id="redact"><option value="1">Strip query strings</option><option value="0">Keep full URLs</option></select></div>
+          <div><label class="f">Large response (KB)</label><input type="number" id="large" value="500" min="10" step="50"></div>
         </div>
+        <label class="f">Redact in summary &amp; CSV</label><select id="redact"><option value="1">Strip query strings</option><option value="0">Keep full URLs</option></select>
         <p class="note">How to get a HAR: open DevTools → Network → reproduce the issue → right-click any request → <em>Save all as HAR</em>. HAR files can contain cookies and tokens. This page never uploads them.</p>
       </div>
     </div>
@@ -219,9 +224,12 @@ function analyze(){
   if(longC.length){const c=longC[0];F.push(['warn',`${longC.length} long redirect chain${longC.length>1?'s':''} (3+ hops)`,`${shortU(c.urls[0])} took ${c.n} redirects to reach ${shortU(c.urls[c.urls.length-1])}. Each hop is another round trip before anything renders, and long chains often hide a misconfigured rewrite. Point the first URL straight at the final one.`])}
   if(nf.length)F.push(['info',`${nf.length} not found (404)`,`Missing resources or a wrong API path: ${nf.slice(0,3).map(x=>x.path.split('?')[0]).join(', ')}${nf.length>3?'…':''}.`]);
   if(slowL.length)F.push(['warn',`${slowL.length} slow request${slowL.length>1?'s':''} (≥ ${fmtMs(slow)})`,`Slowest: ${slowL.slice().sort((a,b)=>b.time-a.time).slice(0,2).map(x=>x.path.split('?')[0]+' ('+fmtMs(x.time)+')').join(', ')}.`+(ttfb.length?` Most of that time is server wait (TTFB), so the backend is slow rather than the network.`:'')]);
+  const sz=sizeIssues(),nm=z=>z.x.path.split('?')[0];
+  if(sz.large.length){const z=sz.large[0],secs=(z.wire>0?z.wire:z.dec)*8/2e6;F.push(['warn',`${sz.large.length} large response${sz.large.length>1?'s':''} (≥ ${sz.kb} KB)`,`Biggest: ${nm(z)} at ${fmtB(z.dec)}${z.wire>0&&Math.abs(z.wire-z.dec)>1024?` (${fmtB(z.wire)} on the wire)`:''}, which takes about ${secs<10?secs.toFixed(1):Math.round(secs)} s to download on a 2 Mbps mobile connection before anything can use it.${sz.large.length>1?` Together the ${sz.large.length} large responses are ${fmtB(sz.large.reduce((s,y)=>s+y.dec,0))}.`:''} Check whether it's needed on first load and whether it can be split, paginated or, for images, resized.`])}
+  if(sz.unc.length){const pct=Math.round(sz.save/sz.uncBytes*100);F.push([sz.save>=51200?'warn':'info',`${sz.unc.length} text response${sz.unc.length>1?'s':''} sent uncompressed`,`${sz.unc.length>1?'These were':'This was'} served with no gzip or br Content-Encoding. Turning compression on at the server or CDN would likely save about ${fmtB(sz.save)} of ${fmtB(sz.uncBytes)} (~${pct}%). Worst: ${sz.unc.slice(0,2).map(z=>nm(z)+' ('+fmtB(z.dec)+' → ~'+fmtB(z.dec-z.save)+')').join(', ')}. It's a config change, not a code change, and the cheapest fix for "slow on my connection".`])}
   const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
   if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
-  return {F,fail,slowL,s4,s5,s0,rc,cors,cf};
+  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz};
 }
 
 // CORS preflights: an OPTIONS with Access-Control-Request-Method (or Chrome's "preflight" type) is checked the way the browser would:
@@ -314,6 +322,44 @@ function hostStats(){
   return [...m.values()].map(h=>({...h,rate:h.n?h.err/h.n:0})).sort((a,b)=>b.err-a.err||b.rate-a.rate||b.n-a.n||a.host.localeCompare(b.host));
 }
 
+// Size & compression: successful responses whose decoded size is over the "Large response" threshold, and text responses
+// (JS, CSS, JSON, HTML, XML/SVG, text/*) of 1 KB or more sent without gzip, br, zstd or deflate.
+// "Likely saving" uses typical gzip ratios per type, so it's an estimate rather than a measurement.
+const ENC_RE=/\b(gzip|x-gzip|br|zstd|deflate|compress)\b/,SAVE={js:.7,css:.78,json:.8,html:.75,xml:.7,text:.6},KIND={js:'JS',css:'CSS',json:'JSON',html:'HTML',xml:'XML/SVG',text:'text'};
+function textKind(x){
+  const mt=(x.e.response?.content?.mimeType||'').toLowerCase().split(';')[0].trim();
+  if(mt.includes('event-stream'))return null;
+  if(/javascript|ecmascript/.test(mt))return 'js';if(mt.includes('css'))return 'css';if(mt.includes('json'))return 'json';
+  if(mt.includes('html'))return 'html';if(/xml|svg/.test(mt))return 'xml';if(mt.startsWith('text/'))return 'text';
+  if(!mt&&(x.type==='js'||x.type==='css'))return x.type;
+  return null;
+}
+function sizeInfo(x){
+  const r=x.e.response||{},c=r.content||{},enc=hdr(r.headers,'content-encoding').trim().toLowerCase();
+  const body=r.bodySize>0?r.bodySize:(r._transferSize>0?r._transferSize:-1),dec0=c.size>0?c.size:-1;
+  const comp=ENC_RE.test(enc)||c.compression>0||(dec0>0&&body>0&&body<dec0*.9);
+  const dec=dec0>0?dec0:(!comp?body:-1),wire=body>0?body:(comp?-1:dec),kind=textKind(x);
+  return {x,enc,comp,dec,wire,kind};
+}
+function sizeIssues(){
+  const kb=Math.max(1,+$('#large').value||500),thr=kb*1024,list=[];
+  entries.forEach(x=>{if(!(x.status>=200&&x.status<300)||x.status===204||x.method==='HEAD')return;
+    const z=sizeInfo(x),big=Math.max(z.dec,z.wire);
+    z.large=big>=thr;z.unc=!!z.kind&&!z.comp&&z.dec>=1024;z.save=z.unc?Math.round(z.dec*SAVE[z.kind]):0;
+    if(z.large||z.unc)list.push(z)});
+  list.sort((p,q)=>Math.max(q.wire,q.dec)-Math.max(p.wire,p.dec)||q.save-p.save||p.x.i-q.x.i);
+  const large=list.filter(z=>z.large),unc=list.filter(z=>z.unc);
+  return {kb,thr,list,large,unc,save:unc.reduce((s,z)=>s+z.save,0),uncBytes:unc.reduce((s,z)=>s+z.dec,0)};
+}
+function sizeHTML(sz){
+  const MAX=15,shown=sz.list.slice(0,MAX);
+  const rows=shown.map(z=>{const x=z.x,typ=z.kind?KIND[z.kind]:x.type;
+    const encP=z.comp?`<span class="pill ok">${esc(z.enc||'compressed')}</span>`:z.kind?'<span class="pill warn">none</span>':'<span class="pill" title="Binary formats like images and fonts are already compressed">binary</span>';
+    return `<tr class="z" data-i="${x.i}" tabindex="0" title="${esc(typ+' · '+x.url)}"><td class="url"><small>${esc(x.host)}</small> ${esc(x.path.split('?')[0])}</td><td class="num">${z.large?`<span class="pill warn" title="Over ${sz.kb} KB">${fmtB(z.dec)}</span>`:fmtB(z.dec)}</td><td class="num opt">${fmtB(z.wire)}</td><td class="opt">${encP}</td><td class="num">${z.unc?`<span class="save">~${fmtB(z.save)}</span>`:'<span style="color:var(--dim)">—</span>'}</td></tr>`}).join('');
+  return `<div class="tablewrap hostwrap"><table id="sizes"><thead><tr><th>URL</th><th class="num">Size</th><th class="num opt">On the wire</th><th class="opt">Encoding</th><th class="num">Likely saving</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <p class="note" style="margin:6px 0 14px">Highlighted sizes are over ${sz.kb} KB, and an encoding of <span class="pill warn">none</span> means the text was sent uncompressed. Size is the decoded body; on the wire is what was actually downloaded. Savings assume typical gzip ratios, so treat them as estimates.${sz.list.length>MAX?` Showing the ${MAX} biggest of ${sz.list.length}.`:''}</p>`;
+}
+
 function render(){
   if(!entries.length)return;
   const a=analyze(),total=Math.max(...entries.map(x=>x.start+x.time)),bytes=entries.reduce((s,x)=>s+(x.size>0?x.size:0),0);
@@ -334,6 +380,7 @@ function render(){
   <div class="findings">${a.F.map(([k,t,d])=>`<div class="finding ${k}"><div><b>${esc(t)}</b><span>${esc(d)}</span></div></div>`).join('')}</div>
   ${a.cf.length?`<h3 class="sec">CORS preflights · ${a.cf.length} failed of ${a.cors.length}</h3><div class="chains">${a.cf.map(corsHTML).join('')}</div>`:''}
   ${a.rc.length?`<h3 class="sec">Redirect chains · ${a.rc.length}</h3><div class="chains">${a.rc.map(chainHTML).join('')}</div>`:''}
+  ${a.sz.list.length?`<h3 class="sec">Size &amp; compression · ${a.sz.list.length}</h3>${sizeHTML(a.sz)}`:''}
   <h3 class="sec">Hosts · ${hs.length}</h3>
   <div class="tablewrap hostwrap"><table id="hosts"><thead><tr><th>Host</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num opt">Total time</th></tr></thead><tbody>${hs.map(h=>{const pc=h.err?(h.rate>=.5?'bad':'warn'):'ok';
     return `<tr class="h ${hostF===h.host?'sel':''}" data-h="${esc(h.host)}" tabindex="0" title="${hostF===h.host?'Click to show all hosts':'Click to filter requests to this host'}"><td class="host">${hostName(h.host)}</td><td class="num">${h.n}</td><td class="num">${h.err?`<span class="pill ${pc}">${h.err}</span>`:'<span style="color:var(--dim)">0</span>'}</td><td class="num">${Math.round(h.rate*100)}%</td><td class="num opt">${fmtMs(h.time)}</td></tr>`}).join('')}</tbody></table></div>
@@ -349,7 +396,7 @@ function render(){
   document.querySelectorAll('tr.h').forEach(r=>{r.onclick=()=>pick(r.dataset.h);r.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick(r.dataset.h)}}});
   const hc=$('#hostClear');if(hc)hc.onclick=()=>{hostF=null;render()};
   const hop=k=>{selected=k;drawRows();detail(entries[k])};
-  document.querySelectorAll('.hop[data-i]').forEach(h=>{h.onclick=()=>hop(+h.dataset.i);h.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();hop(+h.dataset.i)}}});
+  document.querySelectorAll('.hop[data-i],tr.z').forEach(h=>{h.onclick=()=>hop(+h.dataset.i);h.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();hop(+h.dataset.i)}}});
 }
 
 // Every space-separated term must match the URL, the method or the status. "5xx" style terms match a status class; "err" matches status 0.
@@ -374,7 +421,7 @@ function detail(x){
   const body=e.response?.content?.text;
   $('#detailPanel').style.display='';
   $('#detail').innerHTML=`<div class="grid" style="grid-template-columns:1fr 1fr">
-  <div><h3 class="sec">Overview</h3><dl class="kv"><dt>URL</dt><dd class="mono">${esc(x.url)}</dd><dt>Status</dt><dd>${x.status} ${esc(e.response?.statusText||'')}</dd><dt>Started</dt><dd>${esc(e.startedDateTime)}</dd><dt>Server IP</dt><dd>${esc(e.serverIPAddress||'—')}</dd><dt>Request ID</dt><dd class="mono">${esc(hdr(e.response?.headers,'x-request-id')||hdr(e.response?.headers,'cf-ray')||'—')}</dd></dl>
+  <div><h3 class="sec">Overview</h3><dl class="kv"><dt>URL</dt><dd class="mono">${esc(x.url)}</dd><dt>Status</dt><dd>${x.status} ${esc(e.response?.statusText||'')}</dd><dt>Started</dt><dd>${esc(e.startedDateTime)}</dd><dt>Server IP</dt><dd>${esc(e.serverIPAddress||'—')}</dd>${x.status>0?(z=>`<dt>Size</dt><dd>${fmtB(z.dec)} decoded · ${fmtB(z.wire)} on the wire · ${z.comp?esc(z.enc||'compressed'):z.kind?'<span class="pill warn">not compressed</span>':'no Content-Encoding'}</dd>`)(sizeInfo(x)):''}<dt>Request ID</dt><dd class="mono">${esc(hdr(e.response?.headers,'x-request-id')||hdr(e.response?.headers,'cf-ray')||'—')}</dd></dl>
   <h3 class="sec">Timing · ${fmtMs(x.time)}</h3><div class="timing">${Object.keys(TCOL).map(k=>(t[k]>0?`<span title="${k} ${fmtMs(t[k])}" style="width:${t[k]/tot*100}%;background:${TCOL[k]}"></span>`:'')).join('')}</div>
   <div class="legend">${Object.keys(TCOL).filter(k=>t[k]>0).map(k=>`<span><i style="background:${TCOL[k]}"></i>${k} ${fmtMs(t[k])}</span>`).join('')}</div>
   ${body?`<h3 class="sec">Response body</h3><pre class="out">${esc(body.length>3000?body.slice(0,3000)+'\n… (truncated)':body)}</pre>`:''}</div>
@@ -389,6 +436,7 @@ function summary(){
   if(a.cf.length){L.push('','**CORS preflight failures**');a.cf.slice(0,5).forEach(c=>{const b=c.blocked!==null?entries[c.blocked]:null;L.push(`- \`OPTIONS ${U(c.x)}\` for ${c.reqM||'?'} from ${c.origin||'unknown origin'}: ${c.probs.map(p=>p.short).join('; ')}. ${b?(b.status===0?'Blocked the '+b.method+' (status 0)':'The '+b.method+' got '+b.status):'The '+(c.reqM||'real request')+' was never sent'}. Needs: ${c.fix.map(l=>l.startsWith('HTTP/')?'a 204 status':l).join(' / ')}`)})}
   if(a.rc.length){const RU=u=>red?shortU(u):u;L.push('','**Redirect chains**');a.rc.slice(0,5).forEach(c=>{const hs=c.urls.slice(0,12).map(u=>'`'+RU(u)+'`');L.push(`- ${c.loop?'Loop, repeats after '+c.loopAt+' hop'+(c.loopAt>1?'s':''):c.n+' redirects'}: ${hs.join(' → ')}${c.urls.length>12?' → …':''}`)})}
   if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
+  if(a.sz.list.length){L.push('','**Large or uncompressed responses**');a.sz.list.slice(0,5).forEach(z=>L.push(`- \`${U(z.x)}\`: ${fmtB(z.dec)}${z.wire>0&&z.wire!==z.dec?', '+fmtB(z.wire)+' on the wire':''}, ${z.comp?'compressed ('+(z.enc||'yes')+')':z.unc?'no compression, ~'+fmtB(z.save)+' likely saved by gzip/br':'binary'}`));if(a.sz.unc.length)L.push(`- Enabling compression would likely save ~${fmtB(a.sz.save)} in total`)}
   return L.join('\n');
 }
 
@@ -425,28 +473,29 @@ function makeSample(){
   const base=Date.parse('2026-11-18T17:42:10.000Z');let off=0;
   const H=(o)=>Object.entries(o).map(([name,value])=>({name,value}));
   const mk=(method,url,status,mime,size,tm,extra={})=>{off+=extra.gap??40;const timings={blocked:2,dns:extra.dns||-1,connect:extra.conn||-1,ssl:extra.ssl||-1,send:1,wait:tm.wait,receive:tm.recv};
-    const time=Object.values(timings).reduce((s,v)=>s+(v>0?v:0),0);
+    const time=Object.values(timings).reduce((s,v)=>s+(v>0?v:0),0),wire=extra.enc?extra.wire:size;
     return {startedDateTime:new Date(base+off).toISOString(),time,request:{method,url,httpVersion:'h2',headers:H({accept:'*/*','user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0',...(extra.reqH||{})}),queryString:[],cookies:[],headersSize:-1,bodySize:0},
-      response:{status,statusText:extra.st||'',httpVersion:'h2',headers:H({'content-type':mime,...(extra.loc?{location:extra.loc}:{}),...(extra.resH||{})}),cookies:[],content:{size,mimeType:mime,...(extra.body?{text:extra.body}:{})},redirectURL:extra.loc||'',headersSize:-1,bodySize:size,_transferSize:size},
+      response:{status,statusText:extra.st||'',httpVersion:'h2',headers:H({'content-type':mime,...(extra.enc?{'content-encoding':extra.enc}:{}),...(extra.loc?{location:extra.loc}:{}),...(extra.resH||{})}),cookies:[],content:{size,mimeType:mime,...(extra.body?{text:extra.body}:{})},redirectURL:extra.loc||'',headersSize:-1,bodySize:wire,_transferSize:wire},
       cache:{},timings,serverIPAddress:extra.ip||'104.18.22.61',_resourceType:extra.rt||''}};
   const E=[
-    mk('GET','https://app.acmecloud.io/dashboard',200,'text/html',18432,{wait:180,recv:12},{dns:24,conn:31,ssl:42,st:'OK',rt:'document',gap:0}),
-    mk('GET','https://app.acmecloud.io/static/js/main.4f2a91.js',200,'application/javascript',412880,{wait:38,recv:96},{rt:'script'}),
+    mk('GET','https://app.acmecloud.io/dashboard',200,'text/html',18432,{wait:180,recv:12},{dns:24,conn:31,ssl:42,st:'OK',rt:'document',gap:0,enc:'br',wire:4310}),
+    // The main bundle is 1.8 MB and the app server sends it (and the CSS) without gzip or br.
+    mk('GET','https://app.acmecloud.io/static/js/main.4f2a91.js',200,'application/javascript',1908520,{wait:38,recv:410},{rt:'script'}),
     mk('GET','https://app.acmecloud.io/static/css/app.9c1d.css',200,'text/css',48210,{wait:31,recv:14},{rt:'stylesheet',gap:4}),
     mk('GET','https://fonts.gstatic.com/s/inter/v13/inter-latin.woff2',200,'font/woff2',47220,{wait:22,recv:9},{dns:18,conn:20,ssl:26,rt:'font'}),
-    mk('GET','https://app.acmecloud.io/static/img/logo.svg',200,'image/svg+xml',3120,{wait:24,recv:2},{rt:'image',gap:10}),
+    mk('GET','https://app.acmecloud.io/static/img/logo.svg',200,'image/svg+xml',3120,{wait:24,recv:2},{rt:'image',gap:10,enc:'gzip',wire:1190}),
     mk('GET','https://api.acmecloud.io/v2/me',200,'application/json',812,{wait:142,recv:3},{dns:21,conn:29,ssl:38,rt:'fetch',gap:180,resH:{'x-request-id':'req_7Hc2KpX91'},body:'{"id":"usr_4182","email":"dana@northwind.co","role":"member","org":"org_northwind"}'}),
-    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/projects?limit=50',200,'application/json',9412,{wait:388,recv:11},{rt:'fetch',resH:{'x-request-id':'req_7Hc2LmQ04'}}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/projects?limit=50',200,'application/json',9412,{wait:388,recv:11},{rt:'fetch',enc:'gzip',wire:2210,resH:{'x-request-id':'req_7Hc2LmQ04'}}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/billing/invoices',403,'application/json',214,{wait:96,recv:1},{rt:'fetch',st:'Forbidden',resH:{'x-request-id':'req_7Hc2Lr8Zt'},body:'{"error":{"code":"insufficient_role","message":"Role member cannot read billing. Required: admin or billing_manager."}}'}),
     mk('POST','https://api.acmecloud.io/v2/orgs/org_northwind/exports',502,'text/html',166,{wait:30012,recv:2},{rt:'fetch',st:'Bad Gateway',resH:{'x-request-id':'req_7Hc2M0aDe'},body:'<html><body><h1>502 Bad Gateway</h1><p>upstream timed out (30s) while reading response header from export-worker</p></body></html>',reqH:{'content-type':'application/json'}}),
-    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=1',200,'application/json',22140,{wait:2410,recv:18},{rt:'fetch',gap:60,resH:{'x-request-id':'req_7Hc2M3vYp'}}),
-    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=2',200,'application/json',21880,{wait:2290,recv:17},{rt:'fetch',gap:20,resH:{'x-request-id':'req_7Hc2M4bLq'}}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=1',200,'application/json',22140,{wait:2410,recv:18},{rt:'fetch',gap:60,enc:'gzip',wire:4380,resH:{'x-request-id':'req_7Hc2M3vYp'}}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=2',200,'application/json',21880,{wait:2290,recv:17},{rt:'fetch',gap:20,enc:'gzip',wire:4290,resH:{'x-request-id':'req_7Hc2M4bLq'}}),
     mk('GET','https://app.acmecloud.io/static/img/empty-state.png',404,'text/html',148,{wait:44,recv:1},{rt:'image',st:'Not Found'}),
     mk('POST','https://events.thirdparty-analytics.com/v1/track',0,'',0,{wait:-1,recv:-1},{rt:'fetch',st:'',gap:15,ip:''}),
     mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:61,recv:1},{rt:'fetch',st:'Too Many Requests',resH:{'retry-after':'30','x-request-id':'req_7Hc2N1wTs'},body:'{"error":{"code":"rate_limited","message":"Too many requests"}}'}),
     mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
-    mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script'}),
-    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',resH:{'x-request-id':'req_7Hc2P8kRr'}}),
+    mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script',enc:'br',wire:24870}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',enc:'gzip',wire:1020,resH:{'x-request-id':'req_7Hc2P8kRr'}}),
     // Saving org settings: the API's preflight doesn't allow PATCH or the custom client header, so the browser blocks the call.
     mk('OPTIONS','https://api.acmecloud.io/v2/orgs/org_northwind/settings',204,'',0,{wait:34,recv:1},{rt:'preflight',st:'No Content',gap:700,reqH:{origin:'https://app.acmecloud.io','access-control-request-method':'PATCH','access-control-request-headers':'authorization,content-type,x-acme-client'},resH:{'access-control-allow-origin':'https://app.acmecloud.io','access-control-allow-methods':'GET, POST, PUT, DELETE','access-control-allow-headers':'authorization, content-type','access-control-max-age':'600',vary:'Origin'}}),
     mk('PATCH','https://api.acmecloud.io/v2/orgs/org_northwind/settings',0,'',0,{wait:-1,recv:-1},{rt:'fetch',gap:6,ip:'',reqH:{origin:'https://app.acmecloud.io','content-type':'application/json','x-acme-client':'web/4.12.0'}}),
@@ -471,6 +520,7 @@ $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());
 $('#csv').onclick=downloadCSV;
 $('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
 $('#slow').oninput=()=>render();
+$('#large').oninput=()=>render();
 let deb;$('#raw').oninput=()=>{clearTimeout(deb);deb=setTimeout(()=>{const v=$('#raw').value.trim();if(v)load(v)},400)};
 const d=$('#drop'),f=$('#file');d.onclick=()=>f.click();
 f.onchange=()=>f.files[0]&&f.files[0].text().then(t=>{$('#raw').value=t.length>200000?'(large file loaded; not shown here)':t;load(t)});
