@@ -130,6 +130,10 @@ button.pill{cursor:pointer;gap:5px}button.pill:hover{filter:brightness(1.2)}
 tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)}tr.z:focus{outline:none}
 #sizes td.url{max-width:210px}#sizes th{white-space:nowrap}
 .save{color:var(--warn)}
+.hid>b{overflow-wrap:anywhere}
+.hid .probs li .pill{white-space:normal;overflow-wrap:anywhere;max-width:48%}
+.hid .at{color:var(--dim);font-family:var(--mono);font-size:12px}
+@media (max-width:600px){.hid .probs li{flex-wrap:wrap;gap:4px 8px}.hid .probs li .pill{max-width:100%;border-radius:6px}.hid .probs li>span:last-child{flex-basis:100%}}
 @media (max-width:600px){#sizes .opt{display:none}#sizes th,#sizes td{padding:6px 6px}#sizes td.url{max-width:130px}#sizes td.url small{display:none}#sizes th{white-space:normal}}
 @media (max-width:600px){.hop{align-items:flex-start}.hop .u{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}.cors .hop .u{-webkit-line-clamp:3}}
 </style>
@@ -138,7 +142,7 @@ tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)
 <div class="wrap">
   <header class="top">
     <div class="brand"><div class="mark">HAR</div><div><h1>HAR Analyzer</h1><p class="tag">Drop in a browser network export. See what failed, what was slow and the likely cause.</p></div></div>
-    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button id="csv" disabled title="Failed, slow and CORS-blocked requests with status, timing, request ID and start time">Download CSV</button><button class="ghost" id="clear">Clear</button></div>
+    <div class="actions"><button class="primary" id="sample">Load sample HAR</button><button id="copy" disabled>Copy summary for ticket</button><button id="csv" disabled title="Failed, slow, CORS-blocked and error-in-body requests with status, timing, request ID and start time">Download CSV</button><button class="ghost" id="clear">Clear</button></div>
   </header>
 
   <div class="grid">
@@ -174,7 +178,7 @@ tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)
 
 <script>
 const $=s=>document.querySelector(s);
-let entries=[],filter='all',selected=-1,query='',hostF=null,view=null;
+let entries=[],filter='all',selected=-1,query='',hostF=null,view=null,hidCache=null;
 const TCOL={blocked:'#5f6774',dns:'#a371f7',connect:'#f0883e',ssl:'#db61a2',send:'#58a6ff',wait:'#2dd4bf',receive:'#3fb950'};
 
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1600)}
@@ -200,7 +204,7 @@ function load(text){
   const t0=Math.min(...list.map(e=>Date.parse(e.startedDateTime)||0));
   entries=list.map((e,i)=>{const st=(Date.parse(e.startedDateTime)||t0)-t0;const u=(()=>{try{return new URL(e.request.url)}catch{return null}})();
     return {i,e,start:st,time:e.time??0,status:e.response?.status??0,method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
-  selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
+  hidCache=null;selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
 }
 function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true;$('#csv').disabled=true}
 
@@ -216,6 +220,8 @@ function analyze(){
   if(s5.length)F.push(['bad',`${s5.length} server error${s5.length>1?'s':''} (5xx)`,`The server failed to handle these requests (${by(s5)}). That points to the backend, not the customer's browser. Escalate to engineering with the timestamps and request IDs.`]);
   if(s0.length)F.push(['bad',`${s0.length} request${s0.length>1?'s':''} never got a response (status 0)`,`Usually CORS blocking, an ad blocker or extension, a firewall or proxy, or the request was cancelled by navigation. Check the console for CORS errors and retry in an incognito window.`+(blockedN?` ${blockedN===s0.length?(s0.length>1?'All of them':'It'):blockedN+' of them'} followed a failed CORS preflight, so CORS is confirmed for ${blockedN>1?'those':'that one'}.`:'')]);
   if(cf.length){const c=cf[0],b=c.blocked!==null?entries[c.blocked]:null;F.push(['bad',`${cf.length} CORS preflight failure${cf.length>1?'s':''}`,`The preflight for ${c.reqM||'the request'} ${shortU(c.x.url)} from ${c.origin||'an unknown origin'} failed: ${c.probs.map(p=>p.short).join('; ')}. ${b&&b.status===0?`The browser then blocked the ${b.method} (status 0).`:b?`The ${b.method} that followed got ${b.status}.`:`The ${c.reqM||'real request'} was never sent.`} The API needs to ${c.need}.${cf.length>1?` ${cf.length-1} more below.`:''} The exact headers to return are listed under CORS preflights.`])}
+  const hid=hiddenErrors();
+  if(hid.length){const h=hid[0],st=[...new Set(hid.map(y=>y.x.status))].join('/'),gq=hid.some(y=>y.gql);F.push(['bad',`${hid.length} error${hid.length>1?'s':''} hidden inside ${st} response${hid.length>1?'s':''}`,`${hid.length>1?'These requests':'This request'} returned ${st}, so ${hid.length>1?'they don\'t':'it doesn\'t'} count as failed, but the JSON body says something went wrong. First: ${h.x.method} ${shortU(h.x.url)}${h.op?' ('+h.op+')':''}: "${clip(h.items[0].msg,140).replace(/[.!]+$/,'')}". This is often the real bug behind "the page loads but my data never shows up" or a button that silently does nothing. Escalate with the endpoint${gq?', the GraphQL operation':''} and the error message, not the status code.${hid.length>1?` ${hid.length-1} more below.`:''}`])}
   const rc=redirectChains().filter(c=>c.loop||c.n>=3).sort((p,q)=>(!!q.loop-!!p.loop)||q.n-p.n);
   const loops=rc.filter(c=>c.loop),longC=rc.filter(c=>!c.loop);
   if(loops.length){const c=loops[0];F.push(['bad',`${loops.length} redirect loop${loops.length>1?'s':''}`,`${shortU(c.loop)} redirected back to itself after ${c.loopAt} hop${c.loopAt>1?'s':''}, so the page never loads. Usually the login session isn't sticking (a cookie rejected for its domain or SameSite, or blocked third-party cookies) or two rules bounce between each other (http ↔ https, www ↔ bare domain, trailing slash). The chain is shown below.`])}
@@ -229,7 +235,68 @@ function analyze(){
   if(sz.unc.length){const pct=Math.round(sz.save/sz.uncBytes*100);F.push([sz.save>=51200?'warn':'info',`${sz.unc.length} text response${sz.unc.length>1?'s':''} sent uncompressed`,`${sz.unc.length>1?'These were':'This was'} served with no gzip or br Content-Encoding. Turning compression on at the server or CDN would likely save about ${fmtB(sz.save)} of ${fmtB(sz.uncBytes)} (~${pct}%). Worst: ${sz.unc.slice(0,2).map(z=>nm(z)+' ('+fmtB(z.dec)+' → ~'+fmtB(z.dec-z.save)+')').join(', ')}. It's a config change, not a code change, and the cheapest fix for "slow on my connection".`])}
   const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
   if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
-  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz};
+  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz,hid};
+}
+
+// Errors hidden inside 2xx responses: JSON bodies with a non-empty GraphQL-style "errors" array, a top-level "error"
+// that isn't null/false/empty, or "success": false / "ok": false. Batched GraphQL (a top-level array) is checked item by item.
+// Bodies are parsed once per load, since they don't depend on any threshold.
+function clip(s,n){s=String(s??'').replace(/\s+/g,' ').trim();return s.length>n?s.slice(0,n-1)+'…':s}
+function bodyOf(x){
+  const c=x.e.response?.content||{};let t=c.text;if(typeof t!=='string'||!t)return '';
+  if(String(c.encoding||'').toLowerCase()==='base64'){try{const b=atob(t.replace(/\s/g,''));t=new TextDecoder().decode(Uint8Array.from(b,ch=>ch.charCodeAt(0)))}catch{return ''}}
+  return t;
+}
+function jsonBody(x){
+  const mt=(x.e.response?.content?.mimeType||'').toLowerCase(),t=bodyOf(x);if(!t||t.length>5e6)return undefined;
+  const s=t.trimStart().replace(/^\)\]\}'?,?\s*/,'');
+  if(!/^[{[]/.test(s)||!(mt.includes('json')||mt.includes('graphql')||!mt||mt.startsWith('text/plain')))return undefined;
+  try{return JSON.parse(s)}catch{return undefined}
+}
+function errMsg(v){
+  if(v==null)return '';if(typeof v!=='object')return String(v);
+  for(const k of ['message','error_description','detail','title','msg','description','reason'])if(typeof v[k]==='string'&&v[k].trim())return v[k];
+  if(typeof v.error==='string'&&v.error)return v.error;if(v.error&&typeof v.error==='object')return errMsg(v.error);
+  try{return JSON.stringify(v)}catch{return '(unreadable error)'}
+}
+function errCode(v){
+  if(!v||typeof v!=='object')return '';
+  const c=v.extensions?.code??v.code??v.type??v.status??(typeof v.error==='string'&&v.error_description?v.error:v.error?.code);
+  return c!=null&&typeof c!=='object'?String(c):'';
+}
+function gqlOp(x,n){
+  const pd=x.e.request?.postData?.text,name=q=>typeof q==='string'?(q.match(/\b(?:query|mutation|subscription)\s+([_A-Za-z][_0-9A-Za-z]*)/)||[])[1]||'':'';
+  if(pd){try{let b=JSON.parse(pd);if(Array.isArray(b))b=b[n]||{};if(b&&typeof b==='object'){const op=(typeof b.operationName==='string'&&b.operationName)||name(b.query);if(op)return op}}catch{}}
+  try{const u=new URL(x.url);return u.searchParams.get('operationName')||name(u.searchParams.get('query'))}catch{return ''}
+}
+function hiddenErrors(){
+  if(hidCache)return hidCache;const out=[];
+  entries.forEach(x=>{if(!(x.status>=200&&x.status<300)||x.status===204||x.method==='HEAD'||x.method==='OPTIONS')return;
+    const j=jsonBody(x);if(!j||typeof j!=='object')return;
+    const batch=Array.isArray(j),docs=batch?j:[j];
+    docs.forEach((d,n)=>{if(!d||typeof d!=='object'||Array.isArray(d))return;
+      if(batch&&!('errors' in d)&&!('data' in d))return;
+      const items=[],kinds=[],gql=Array.isArray(d.errors)&&('data' in d||/graphql/i.test(x.url)||!!x.e.request?.postData?.text?.includes('"query"'));
+      if(Array.isArray(d.errors)&&d.errors.length){kinds.push(gql?'GraphQL errors':'errors array');d.errors.forEach(er=>{const p=Array.isArray(er?.path)?er.path.join('.'):'';items.push({msg:errMsg(er)||'(no message)',code:errCode(er),path:p})})}
+      if(!batch){
+        const e=d.error,has=e!=null&&e!==false&&e!==''&&e!==0&&!(typeof e==='object'&&!Array.isArray(e)&&!Object.keys(e).length)&&!(Array.isArray(e)&&!e.length);
+        if(has&&!items.length){kinds.push('error');items.push({msg:typeof e==='object'?errMsg(e):(typeof d.error_description==='string'&&d.error_description)||(typeof d.message==='string'&&d.message)||String(e),code:typeof e==='object'?errCode(e):(d.error_description||d.message?String(e):errCode(d)),path:''})}
+        else if(has)kinds.push('error');
+        ['success','ok'].forEach(k=>{if(d[k]!==false)return;kinds.push(k+': false');if(items.length)return;
+          const m=['message','error_description','detail','msg','reason','error'].map(f=>d[f]).find(v=>typeof v==='string'&&v.trim());
+          items.push({msg:m||'The body says '+k+': false but gives no message',code:errCode(d),path:''})});
+      }
+      if(items.length)out.push({x,n:batch?n:null,gql,op:gql?gqlOp(x,batch?n:0):'',kinds,items,partial:gql&&d.data!=null&&!(typeof d.data==='object'&&Object.values(d.data).every(v=>v==null))});
+    });
+  });
+  return hidCache=out.sort((p,q)=>p.x.start-q.x.start||p.x.i-q.x.i||(p.n??0)-(q.n??0));
+}
+function hidHTML(h){
+  const x=h.x,MAX=5,more=h.items.length-MAX,pth=(()=>{try{const u=new URL(x.url);return esc(u.pathname+u.search)}catch{return esc(x.url)}})();
+  const why=`Returned ${x.status}, but the body reports ${h.items.length>1?h.items.length+' errors':'an error'}${h.kinds.length?' ('+esc(h.kinds.join(', '))+')':''}.`+(h.gql?(h.partial?' Some data came back too, so part of the screen may render while the rest stays empty.':' No usable data came back.'):'')+(h.n!==null?` Item ${h.n+1} of a batched request.`:'');
+  return `<div class="chain bad hid"><b>${h.gql?'GraphQL error':'Error in a '+x.status+' response'} · ${esc(x.method)} ${esc(shortU(x.url))}${h.op?' · <span class="mono">'+esc(h.op)+'</span>':''}</b><span class="why">${why}</span>
+  <ul class="probs">${h.items.slice(0,MAX).map(it=>`<li><span class="pill bad"${it.code?` title="${esc(it.code)}"`:''}>${it.code?esc(clip(it.code,32)):'✕'}</span><span>${esc(clip(it.msg,300))}${it.path?' <span class="at">at '+esc(clip(it.path,80))+'</span>':''}</span></li>`).join('')}${more>0?`<li><span class="pill">+${more}</span><span>more in the response body</span></li>`:''}</ul>
+  <ol class="hops"><li class="hop" data-i="${x.i}" tabindex="0" title="${esc(x.url)}"><span class="arr">•</span><span class="pill ok">${x.status}</span><span class="u"><b class="mono" style="font-weight:600">${esc(x.method)}</b> ${pth}</span><span class="pill">open body</span></li></ol></div>`;
 }
 
 // CORS preflights: an OPTIONS with Access-Control-Request-Method (or Chrome's "preflight" type) is checked the way the browser would:
@@ -379,6 +446,7 @@ function render(){
   <h3 class="sec">Findings</h3>
   <div class="findings">${a.F.map(([k,t,d])=>`<div class="finding ${k}"><div><b>${esc(t)}</b><span>${esc(d)}</span></div></div>`).join('')}</div>
   ${a.cf.length?`<h3 class="sec">CORS preflights · ${a.cf.length} failed of ${a.cors.length}</h3><div class="chains">${a.cf.map(corsHTML).join('')}</div>`:''}
+  ${a.hid.length?`<h3 class="sec">Errors inside 2xx responses · ${a.hid.length}</h3><div class="chains">${a.hid.slice(0,10).map(hidHTML).join('')}</div>${a.hid.length>10?`<p class="note" style="margin:-6px 0 14px">Showing the first 10 of ${a.hid.length}. All of them are in the CSV.</p>`:''}`:''}
   ${a.rc.length?`<h3 class="sec">Redirect chains · ${a.rc.length}</h3><div class="chains">${a.rc.map(chainHTML).join('')}</div>`:''}
   ${a.sz.list.length?`<h3 class="sec">Size &amp; compression · ${a.sz.list.length}</h3>${sizeHTML(a.sz)}`:''}
   <h3 class="sec">Hosts · ${hs.length}</h3>
@@ -434,6 +502,7 @@ function summary(){
   const L=['**HAR summary**',`- ${entries.length} requests, ${a.fail.length} failed, ${a.slowL.length} slow (≥ ${$('#slow').value} ms)`,'','**Findings**',...a.F.map(f=>`- ${f[1]}: ${f[2]}`)];
   if(a.fail.length){L.push('','**Failed requests**');a.fail.slice(0,10).forEach(x=>L.push(`- \`${x.status||'ERR'} ${x.method} ${U(x)}\` at ${x.e.startedDateTime}${hdr(x.e.response?.headers,'x-request-id')?' (request id '+hdr(x.e.response.headers,'x-request-id')+')':''}`))}
   if(a.cf.length){L.push('','**CORS preflight failures**');a.cf.slice(0,5).forEach(c=>{const b=c.blocked!==null?entries[c.blocked]:null;L.push(`- \`OPTIONS ${U(c.x)}\` for ${c.reqM||'?'} from ${c.origin||'unknown origin'}: ${c.probs.map(p=>p.short).join('; ')}. ${b?(b.status===0?'Blocked the '+b.method+' (status 0)':'The '+b.method+' got '+b.status):'The '+(c.reqM||'real request')+' was never sent'}. Needs: ${c.fix.map(l=>l.startsWith('HTTP/')?'a 204 status':l).join(' / ')}`)})}
+  if(a.hid.length){L.push('','**Errors inside 2xx responses**');a.hid.slice(0,10).forEach(h=>L.push(`- \`${h.x.status} ${h.x.method} ${U(h.x)}\`${h.op?' ('+(h.gql?'GraphQL ':'')+h.op+')':''} at ${h.x.e.startedDateTime}: ${h.items.slice(0,3).map(it=>(it.code?'['+it.code+'] ':'')+clip(it.msg,200)+(it.path?' (at '+it.path+')':'')).join('; ')}${h.items.length>3?'; +'+(h.items.length-3)+' more':''}${hdr(h.x.e.response?.headers,'x-request-id')?' (request id '+hdr(h.x.e.response.headers,'x-request-id')+')':''}`));if(a.hid.length>10)L.push(`- …and ${a.hid.length-10} more`)}
   if(a.rc.length){const RU=u=>red?shortU(u):u;L.push('','**Redirect chains**');a.rc.slice(0,5).forEach(c=>{const hs=c.urls.slice(0,12).map(u=>'`'+RU(u)+'`');L.push(`- ${c.loop?'Loop, repeats after '+c.loopAt+' hop'+(c.loopAt>1?'s':''):c.n+' redirects'}: ${hs.join(' → ')}${c.urls.length>12?' → …':''}`)})}
   if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
   if(a.sz.list.length){L.push('','**Large or uncompressed responses**');a.sz.list.slice(0,5).forEach(z=>L.push(`- \`${U(z.x)}\`: ${fmtB(z.dec)}${z.wire>0&&z.wire!==z.dec?', '+fmtB(z.wire)+' on the wire':''}, ${z.comp?'compressed ('+(z.enc||'yes')+')':z.unc?'no compression, ~'+fmtB(z.save)+' likely saved by gzip/br':'binary'}`));if(a.sz.unc.length)L.push(`- Enabling compression would likely save ~${fmtB(a.sz.save)} in total`)}
@@ -443,27 +512,28 @@ function summary(){
 // CSV of every failed or slow request, in the order they happened, for attaching to a ticket.
 // Cells that a spreadsheet would read as a formula (=, +, -, @, tab, CR) get a leading ' so a crafted HAR can't run one.
 function csvCell(v){let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}
-function findingOf(x,slowSet,cmap){
+function findingOf(x,slowSet,cmap,hmap){
   const s=x.status,r=[],pf=cmap?.get(x.i);
   if(pf?.pre)r.push((s===0?'No response (status 0); ':'')+'CORS preflight failed: '+pf.pre.probs.map(p=>p.short).join('; '));
   else if(s===0)r.push('No response (status 0)'+(pf?.by?'; Blocked by failed CORS preflight':''));else if(s>=500)r.push('Server error (5xx)');else if(s===401||s===403)r.push('Auth failure (401/403)');else if(s===429)r.push('Rate limited (429)');else if(s===404)r.push('Not found (404)');else if(s>=400)r.push('Client error (4xx)');
+  const hb=hmap?.get(x.i);if(hb)r.push('Error in '+s+' body'+(hb[0].op?' ('+hb[0].op+')':'')+': '+hb.flatMap(h=>h.items).slice(0,3).map(it=>(it.code?'['+it.code+'] ':'')+clip(it.msg,160)).join('; '));
   if(slowSet.has(x))r.push('Slow (≥ '+(+$('#slow').value||1000)+' ms)');
   return r.join('; ');
 }
 function issuesCSV(){
   const a=analyze(),red=$('#redact').value==='1',slowSet=new Set(a.slowL),cmap=new Map();
   a.cf.forEach(c=>{cmap.set(c.i,{pre:c});if(c.blocked!==null)cmap.set(c.blocked,{by:c})});
-  const rows=[...new Set([...a.fail,...a.slowL,...a.cf.map(c=>c.x)])].sort((p,q)=>p.start-q.start||p.i-q.i);
+  const hmap=new Map();a.hid.forEach(h=>hmap.set(h.x.i,[...(hmap.get(h.x.i)||[]),h]));
+  const rows=[...new Set([...a.fail,...a.slowL,...a.cf.map(c=>c.x),...a.hid.map(h=>h.x)])].sort((p,q)=>p.start-q.start||p.i-q.i);
   const head=['Finding','Status','Method','URL','Time (ms)','Server wait (ms)','Request ID','Started'];
   const lines=rows.map(x=>{const rh=x.e.response?.headers,w=x.e.timings?.wait;
-    return [findingOf(x,slowSet,cmap),x.status||'ERR',x.method,red?x.host+x.path.split('?')[0]:x.url,x.status===0&&!(x.time>0)?'':Math.round(Math.max(0,x.time||0)),w>=0?Math.round(w):'',hdr(rh,'x-request-id')||hdr(rh,'cf-ray'),x.e.startedDateTime||''].map(csvCell).join(',')});
+    return [findingOf(x,slowSet,cmap,hmap),x.status||'ERR',x.method,red?x.host+x.path.split('?')[0]:x.url,x.status===0&&!(x.time>0)?'':Math.round(Math.max(0,x.time||0)),w>=0?Math.round(w):'',hdr(rh,'x-request-id')||hdr(rh,'cf-ray'),x.e.startedDateTime||''].map(csvCell).join(',')});
   return {n:rows.length,text:'\ufeff'+[head.join(','),...lines].join('\r\n')+'\r\n'};
 }
 function downloadCSV(){
   if(!entries.length)return toast('This HAR has no requests to export');
   const {n,text}=issuesCSV();
-  if(!n)return toast('Nothing failed or was slow, so there\'s nothing to export');
-  const t=Date.parse(entries.slice().sort((p,q)=>p.start-q.start)[0].e.startedDateTime),iso=isNaN(t)?'':new Date(t).toISOString(),stamp=iso?'-'+iso.slice(0,10)+'-'+iso.slice(11,16).replace(':',''):'';
+  if(!n)return toast('Nothing failed or was slow, so there\'s nothing to export');  const t=Date.parse(entries.slice().sort((p,q)=>p.start-q.start)[0].e.startedDateTime),iso=isNaN(t)?'':new Date(t).toISOString(),stamp=iso?'-'+iso.slice(0,10)+'-'+iso.slice(11,16).replace(':',''):'';
   const url=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');
   a.href=url;a.download='har-failed-slow'+stamp+'.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
   toast(`Downloaded ${n} request${n>1?'s':''} as CSV`);
@@ -474,7 +544,7 @@ function makeSample(){
   const H=(o)=>Object.entries(o).map(([name,value])=>({name,value}));
   const mk=(method,url,status,mime,size,tm,extra={})=>{off+=extra.gap??40;const timings={blocked:2,dns:extra.dns||-1,connect:extra.conn||-1,ssl:extra.ssl||-1,send:1,wait:tm.wait,receive:tm.recv};
     const time=Object.values(timings).reduce((s,v)=>s+(v>0?v:0),0),wire=extra.enc?extra.wire:size;
-    return {startedDateTime:new Date(base+off).toISOString(),time,request:{method,url,httpVersion:'h2',headers:H({accept:'*/*','user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0',...(extra.reqH||{})}),queryString:[],cookies:[],headersSize:-1,bodySize:0},
+    return {startedDateTime:new Date(base+off).toISOString(),time,request:{method,url,httpVersion:'h2',headers:H({accept:'*/*','user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0',...(extra.reqH||{})}),queryString:[],cookies:[],headersSize:-1,bodySize:extra.post?extra.post.length:0,...(extra.post?{postData:{mimeType:'application/json',text:extra.post}}:{})},
       response:{status,statusText:extra.st||'',httpVersion:'h2',headers:H({'content-type':mime,...(extra.enc?{'content-encoding':extra.enc}:{}),...(extra.loc?{location:extra.loc}:{}),...(extra.resH||{})}),cookies:[],content:{size,mimeType:mime,...(extra.body?{text:extra.body}:{})},redirectURL:extra.loc||'',headersSize:-1,bodySize:wire,_transferSize:wire},
       cache:{},timings,serverIPAddress:extra.ip||'104.18.22.61',_resourceType:extra.rt||''}};
   const E=[
@@ -496,6 +566,11 @@ function makeSample(){
     mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
     mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script',enc:'br',wire:24870}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',enc:'gzip',wire:1020,resH:{'x-request-id':'req_7Hc2P8kRr'}}),
+    // Three calls that look green in DevTools but failed: a GraphQL resolver error, an invite rejected with success:false,
+    // and an integration status that returns 200 with an error object.
+    mk('POST','https://api.acmecloud.io/graphql',200,'application/json',236,{wait:212,recv:2},{rt:'fetch',gap:30,resH:{'x-request-id':'req_7Hc2Q2nGs'},post:'{"operationName":"OrgUsage","variables":{"org":"org_northwind"},"query":"query OrgUsage($org: ID!) { org(id: $org) { name usage { seats storageGb } } }"}',body:'{"data":{"org":{"name":"Northwind","usage":null}},"errors":[{"message":"Cannot return null for non-nullable field Usage.seats.","path":["org","usage","seats"],"extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}'}),
+    mk('POST','https://api.acmecloud.io/v2/orgs/org_northwind/invites',200,'application/json',124,{wait:156,recv:1},{rt:'fetch',gap:420,reqH:{'content-type':'application/json'},resH:{'x-request-id':'req_7Hc2Q9wEx'},post:'{"email":"sam@northwind.co","role":"member"}',body:'{"success":false,"code":"seat_limit_reached","message":"Seat limit reached (25 of 25). Upgrade the plan or remove a member."}'}),
+    mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/integrations/slack',200,'application/json',131,{wait:88,recv:1},{rt:'fetch',gap:40,resH:{'x-request-id':'req_7Hc2R0kTb'},body:'{"connected":true,"error":{"code":"token_revoked","message":"The Slack token was revoked by a workspace admin."}}'}),
     // Saving org settings: the API's preflight doesn't allow PATCH or the custom client header, so the browser blocks the call.
     mk('OPTIONS','https://api.acmecloud.io/v2/orgs/org_northwind/settings',204,'',0,{wait:34,recv:1},{rt:'preflight',st:'No Content',gap:700,reqH:{origin:'https://app.acmecloud.io','access-control-request-method':'PATCH','access-control-request-headers':'authorization,content-type,x-acme-client'},resH:{'access-control-allow-origin':'https://app.acmecloud.io','access-control-allow-methods':'GET, POST, PUT, DELETE','access-control-allow-headers':'authorization, content-type','access-control-max-age':'600',vary:'Origin'}}),
     mk('PATCH','https://api.acmecloud.io/v2/orgs/org_northwind/settings',0,'',0,{wait:-1,recv:-1},{rt:'fetch',gap:6,ip:'',reqH:{origin:'https://app.acmecloud.io','content-type':'application/json','x-acme-client':'web/4.12.0'}}),
@@ -515,7 +590,7 @@ function makeSample(){
 }
 
 $('#sample').onclick=()=>{const s=makeSample();$('#raw').value=s;load(s);toast('Loaded a sample HAR from a fake SaaS dashboard')};
-$('#clear').onclick=()=>{entries=[];query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
+$('#clear').onclick=()=>{entries=[];hidCache=null;query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
 $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());toast('Summary copied as Markdown')}catch{toast('Clipboard blocked by the browser')}};
 $('#csv').onclick=downloadCSV;
 $('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
