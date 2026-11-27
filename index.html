@@ -135,6 +135,10 @@ tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)
 .hid .at{color:var(--dim);font-family:var(--mono);font-size:12px}
 @media (max-width:600px){.hid .probs li{flex-wrap:wrap;gap:4px 8px}.hid .probs li .pill{max-width:100%;border-radius:6px}.hid .probs li>span:last-child{flex-basis:100%}}
 @media (max-width:600px){#sizes .opt{display:none}#sizes th,#sizes td{padding:6px 6px}#sizes td.url{max-width:130px}#sizes td.url small{display:none}#sizes th{white-space:normal}}
+tr.rp{cursor:pointer}tr.rp:hover td,tr.rp:focus-visible td{background:var(--panel2)}tr.rp:focus{outline:none}
+tr.rp.sel td{background:#10201e}tr.rp.sel td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
+#reps td.url{max-width:250px}#reps th{white-space:nowrap}#reps td.sts{line-height:1.9}
+@media (max-width:600px){#reps .opt{display:none}#reps th,#reps td{padding:6px 6px}#reps td.url{max-width:120px}#reps td.url small{display:none}}
 @media (max-width:600px){.hop{align-items:flex-start}.hop .u{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}#hosts th,#hosts td{padding:6px 6px}#hosts td.host{max-width:118px}#hosts .opt{display:none}.filterbar{flex-wrap:wrap}.filterbar input{flex-basis:100%}.cors .hop .u{-webkit-line-clamp:3}}
 </style>
 </head>
@@ -178,7 +182,7 @@ tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)
 
 <script>
 const $=s=>document.querySelector(s);
-let entries=[],filter='all',selected=-1,query='',hostF=null,view=null,hidCache=null;
+let entries=[],filter='all',selected=-1,query='',hostF=null,view=null,hidCache=null,repF=null,repCache=null,repOf=new Map();
 const TCOL={blocked:'#5f6774',dns:'#a371f7',connect:'#f0883e',ssl:'#db61a2',send:'#58a6ff',wait:'#2dd4bf',receive:'#3fb950'};
 
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1600)}
@@ -203,8 +207,8 @@ function load(text){
   const list=j?.log?.entries;if(!Array.isArray(list))return showErr('Couldn\'t find log.entries. Is this a HAR export?');
   const t0=Math.min(...list.map(e=>Date.parse(e.startedDateTime)||0));
   entries=list.map((e,i)=>{const st=(Date.parse(e.startedDateTime)||t0)-t0;const u=(()=>{try{return new URL(e.request.url)}catch{return null}})();
-    return {i,e,start:st,time:e.time??0,status:e.response?.status??0,method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
-  hidCache=null;selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
+    return {i,e,start:st,time:e.time??0,status:Math.max(0,Math.trunc(+e.response?.status||0)),method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
+  hidCache=null;repCache=null;repF=null;selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
 }
 function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true;$('#csv').disabled=true}
 
@@ -226,7 +230,14 @@ function analyze(){
   const loops=rc.filter(c=>c.loop),longC=rc.filter(c=>!c.loop);
   if(loops.length){const c=loops[0];F.push(['bad',`${loops.length} redirect loop${loops.length>1?'s':''}`,`${shortU(c.loop)} redirected back to itself after ${c.loopAt} hop${c.loopAt>1?'s':''}, so the page never loads. Usually the login session isn't sticking (a cookie rejected for its domain or SameSite, or blocked third-party cookies) or two rules bounce between each other (http ↔ https, www ↔ bare domain, trailing slash). The chain is shown below.`])}
   if(auth.length)F.push(['warn',`${auth.length} auth failure${auth.length>1?'s':''} (401/403)`,`The session or token was rejected on ${by(auth)}. Likely an expired session, a missing permission or an SSO misconfiguration. Ask the customer to sign out and back in, then check their role.`]);
-  if(rl.length)F.push(['warn',`${rl.length} rate-limited request${rl.length>1?'s':''} (429)`,`The client is sending too many requests. Look for retry loops or a script hammering the API.`+(hdr(rl[0].e.response.headers,'retry-after')?` Retry-After: ${hdr(rl[0].e.response.headers,'retry-after')}s.`:'')]);
+  const rp=repeatedGroups(),rw=rp.filter(g=>g.warn),rlg=rw.find(g=>g.rl);
+  if(rl.length)F.push(['warn',`${rl.length} rate-limited request${rl.length>1?'s':''} (429)`,`The client is sending too many requests. Look for retry loops or a script hammering the API.`+(hdr(rl[0].e.response.headers,'retry-after')?` Retry-After: ${hdr(rl[0].e.response.headers,'retry-after')}s.`:'')+(rlg?` Here it's ${rlg.method} ${repShort(rlg)}, called ${rlg.n} times in ${repSpan(rlg)} (see Repeated requests).`:'')]);
+  if(rw.length){const g=rw[0],ex=rw.reduce((s,y)=>s+y.n-1,0),write=g.kind==='twice';
+    const fs=g.statuses.filter(([s])=>s>=400||s===0).map(([s,c])=>(s||'ERR')+(c>1?' ×'+c:'')).join(', ');
+    const what=g.kind==='retry'?`It kept firing after failing (${fs}) with little or no backoff.`:write?`The same ${g.method} with the same body went out twice ${g.span<1000?Math.round(g.span)+' ms':fmtMs(g.span)} apart, which can create duplicates (a double charge, two invites, two tickets). Usually a double click on a button that isn't disabled while saving, or a submit handler bound twice.`:`Same method, URL and body every time${g.dropped.length?' (only the cache-busting '+g.dropped.join(', ')+' param'+(g.dropped.length>1?'s':'')+' changed)':''}.${g.fails>g.rl?` ${g.fails} of them failed (${fs}).`:''}`;
+    F.push(['warn',rw.length===1?`${g.method} ${repShort(g)} called ${g.n} times in ${repSpan(g)}`:`${rw.length} requests repeated in quick succession (${ex} extra calls)`,
+      `${rw.length>1?`Worst: ${g.method} ${repShort(g)}, ${g.n} times in ${repSpan(g)}. `:''}${what}${g.rl?` ${g.rl} of them got 429, so the app is rate-limiting itself: stop the repeat and the 429s go away.`:''}${write?'':' Usually a component re-fetching on every render, a missing cache or request dedupe, or a retry loop with no backoff. It explains both rate-limit tickets and "the page keeps spinning".'} Every repeat is listed under Repeated requests.`])}
+  else{const tw=rp.filter(g=>g.kind==='twice');if(tw.length)F.push(['info',`${tw.length} request${tw.length>1?'s':''} fired twice within 2 s`,`The same call went out back to back: ${tw.slice(0,2).map(g=>g.method+' '+repShort(g)).join(', ')}${tw.length>2?'…':''}. Often two components loading the same data, or React StrictMode running effects twice in a dev build. Harmless once, but worth a shared cache or dedupe.`])}
   if(longC.length){const c=longC[0];F.push(['warn',`${longC.length} long redirect chain${longC.length>1?'s':''} (3+ hops)`,`${shortU(c.urls[0])} took ${c.n} redirects to reach ${shortU(c.urls[c.urls.length-1])}. Each hop is another round trip before anything renders, and long chains often hide a misconfigured rewrite. Point the first URL straight at the final one.`])}
   if(nf.length)F.push(['info',`${nf.length} not found (404)`,`Missing resources or a wrong API path: ${nf.slice(0,3).map(x=>x.path.split('?')[0]).join(', ')}${nf.length>3?'…':''}.`]);
   if(slowL.length)F.push(['warn',`${slowL.length} slow request${slowL.length>1?'s':''} (≥ ${fmtMs(slow)})`,`Slowest: ${slowL.slice().sort((a,b)=>b.time-a.time).slice(0,2).map(x=>x.path.split('?')[0]+' ('+fmtMs(x.time)+')').join(', ')}.`+(ttfb.length?` Most of that time is server wait (TTFB), so the backend is slow rather than the network.`:'')]);
@@ -235,7 +246,59 @@ function analyze(){
   if(sz.unc.length){const pct=Math.round(sz.save/sz.uncBytes*100);F.push([sz.save>=51200?'warn':'info',`${sz.unc.length} text response${sz.unc.length>1?'s':''} sent uncompressed`,`${sz.unc.length>1?'These were':'This was'} served with no gzip or br Content-Encoding. Turning compression on at the server or CDN would likely save about ${fmtB(sz.save)} of ${fmtB(sz.uncBytes)} (~${pct}%). Worst: ${sz.unc.slice(0,2).map(z=>nm(z)+' ('+fmtB(z.dec)+' → ~'+fmtB(z.dec-z.save)+')').join(', ')}. It's a config change, not a code change, and the cheapest fix for "slow on my connection".`])}
   const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
   if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
-  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz,hid};
+  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz,hid,rp};
+}
+
+// Repeated requests: grouped by method, URL and request body, ignoring cache-busting query params (_=, cb=, ts=, nonce=,
+// any 13-digit epoch value…). Redirect hops and CORS preflights are left out; redirect loops have their own section.
+// A group is listed when it ran 3+ times, twice within 2 s, or failed and was retried within 10 s, then labelled:
+// polling (3+ at a steady interval of 2 s or more, no failures), retry (a failure followed within 10 s by the same call),
+// burst (3+ inside any 10 s window), twice, or repeated. Retries, bursts and a write sent twice are warnings.
+// Grouping doesn't depend on any threshold, so it runs once per load.
+const BUST_RE=/^(_|_t|_ts|__t|_dc|ts|cb|_cb|cache_?bust(er|ing)?|no_?cache|bust|rnd|rand(om)?|nonce|timestamp)$/i,REDIR=new Set([301,302,303,307,308]);
+const REP_LBL={polling:'polling',retry:'retry loop',burst:'burst',twice:'twice',repeated:'repeated'};
+function fnv(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return (h>>>0).toString(36)}
+function repURL(url){
+  let u;try{u=new URL(url)}catch{return {key:String(url),host:'',path:String(url),dropped:[]}}
+  const keep=[],dropped=[];
+  for(const [k,v] of u.searchParams){if(BUST_RE.test(k)||(/^[tr]$/i.test(k)&&/^(\d{6,}|0?\.\d+)$/.test(v))||/^1\d{12}$/.test(v))dropped.push(k);else keep.push([k,v])}
+  keep.sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:a[1]<b[1]?-1:a[1]>b[1]?1:0);
+  const qs=keep.map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&'),path=u.pathname+(qs?'?'+qs:'');
+  return {key:u.protocol+'//'+u.host+path,host:u.host,path,dropped};
+}
+function repShort(g){return g.host+g.path.split('?')[0]}
+function repSpan(g){return g.span>0?fmtMs(g.span):'at once'}
+function repeatedGroups(){
+  if(repCache)return repCache;const m=new Map(),out=[];
+  entries.forEach(x=>{if(isPreflight(x)||REDIR.has(x.status))return;
+    const r=repURL(x.url),pd=x.e.request?.postData?.text,key=x.method+' '+r.key+(pd?' #'+fnv(String(pd)):'');
+    const g=m.get(key)||{key,method:x.method,host:r.host,path:r.path,dropped:new Set(),xs:[]};
+    r.dropped.forEach(d=>g.dropped.add(d));g.xs.push(x);m.set(key,g)});
+  const bad=x=>x.status>=400||x.status===0;
+  m.forEach(g=>{const xs=g.xs.sort((p,q)=>p.start-q.start||p.i-q.i),n=xs.length;if(n<2)return;
+    const st=xs.map(x=>x.start),span=st[n-1]-st[0],gaps=st.slice(1).map((s,k)=>s-st[k]),mean=span/(n-1);
+    let peak=1;for(let a=0,b=0;b<n;b++){while(st[b]-st[a]>10000)a++;peak=Math.max(peak,b-a+1)}
+    const fb=gaps.findIndex((gp,k)=>bad(xs[k])&&gp<=10000),retry=fb>=0;
+    const polling=n>=3&&mean>=2000&&Math.max(...gaps)-Math.min(...gaps)<=mean*.35&&!xs.some(bad);
+    if(!(n>=3||span<=2000||retry))return;
+    // A burst that only starts failing near the end (e.g. 429 after the 5th call) is a burst; most calls after a failure is a retry loop.
+    const kind=polling?'polling':retry&&(peak<3||fb<(n-1)/2)?'retry':peak>=3?'burst':retry?'retry':n===2&&span<=2000?'twice':'repeated';
+    const write=!/^(GET|HEAD)$/i.test(String(g.method||'')),sc=new Map();xs.forEach(x=>sc.set(x.status,(sc.get(x.status)||0)+1));
+    out.push({key:g.key,method:g.method,host:g.host,path:g.path,dropped:[...g.dropped],xs,n,span,mean,peak,kind,
+      warn:kind==='retry'||kind==='burst'||(kind==='twice'&&write),statuses:[...sc].sort((a,b)=>a[0]-b[0]),
+      fails:xs.filter(bad).length,rl:xs.filter(x=>x.status===429).length});
+  });
+  out.sort((p,q)=>q.warn-p.warn||q.n-p.n||p.xs[0].start-q.xs[0].start||p.xs[0].i-q.xs[0].i);
+  repOf=new Map();out.forEach(g=>g.xs.forEach(x=>repOf.set(x.i,g.key)));
+  return repCache=out;
+}
+function repHTML(rp){
+  const MAX=15,shown=rp.slice(0,MAX),sp=s=>s>=500||s===0?'bad':s>=400?'warn':s>=300?'info':'ok',drop=[...new Set(rp.flatMap(g=>g.dropped))];
+  const rows=shown.map(g=>{const pc=g.kind==='retry'?(g.rl||g.xs.some(x=>x.status>=500||x.status===0)?'bad':'warn'):g.warn?'warn':'info';
+    const tip=g.kind==='polling'?`Steady polling about every ${fmtMs(g.mean)}`:g.kind==='retry'?`Kept firing after ${g.fails} failure${g.fails>1?'s':''}`:g.kind==='burst'?`${g.peak} calls inside 10 s`:g.kind==='twice'?`Sent twice, ${Math.round(g.span)} ms apart`:`${g.n} calls spread over ${fmtMs(g.span)}`;
+    return `<tr class="rp ${repF===g.key?'sel':''}" data-k="${esc(g.key)}" tabindex="0" title="${esc(tip+' · '+g.method+' '+g.key+(repF===g.key?' · click to show all requests':' · click to list every call'))}"><td class="url"><b class="mono" style="font-weight:600">${esc(g.method)}</b> <small>${esc(g.host)}</small> ${esc(g.path)}</td><td class="num">${g.n}×</td><td class="num opt">${repSpan(g)}</td><td class="sts">${g.statuses.map(([s,c])=>`<span class="pill ${sp(s)}">${s||'ERR'}${c>1?' ×'+c:''}</span>`).join(' ')}</td><td><span class="pill ${pc}" title="${esc(tip)}">${REP_LBL[g.kind]}</span></td></tr>`}).join('');
+  return `<div class="tablewrap hostwrap"><table id="reps"><thead><tr><th>Request</th><th class="num">Calls</th><th class="num opt">Span</th><th>Statuses</th><th>Pattern</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <p class="note" style="margin:6px 0 14px">Grouped by method, URL and request body${drop.length?', ignoring cache-busting params (<span class="mono">'+esc(drop.join(', '))+'</span>)':''}. Redirect hops and CORS preflights are left out. A <span class="pill warn">burst</span> is 3+ calls inside 10 s, a <span class="pill bad">retry loop</span> kept going after failures, and <span class="pill info">polling</span> runs on a steady timer. Click a row to see every call in the request table.${rp.length>MAX?` Showing ${MAX} of ${rp.length}.`:''}</p>`;
 }
 
 // Errors hidden inside 2xx responses: JSON bodies with a non-empty GraphQL-style "errors" array, a top-level "error"
@@ -434,6 +497,7 @@ function render(){
   const types=['all','errors','slow','api','js','css','img','doc'];
   view={a,total};
   const hs=hostStats();if(hostF!==null&&!hs.some(h=>h.host===hostF))hostF=null;
+  const rg=repF===null?null:a.rp.find(g=>g.key===repF)||null;if(!rg)repF=null;
   const hostName=h=>h?esc(h):'<span style="color:var(--dim)">(no host)</span>';
   $('#out').innerHTML=`
   <div class="stats">
@@ -448,12 +512,13 @@ function render(){
   ${a.cf.length?`<h3 class="sec">CORS preflights · ${a.cf.length} failed of ${a.cors.length}</h3><div class="chains">${a.cf.map(corsHTML).join('')}</div>`:''}
   ${a.hid.length?`<h3 class="sec">Errors inside 2xx responses · ${a.hid.length}</h3><div class="chains">${a.hid.slice(0,10).map(hidHTML).join('')}</div>${a.hid.length>10?`<p class="note" style="margin:-6px 0 14px">Showing the first 10 of ${a.hid.length}. All of them are in the CSV.</p>`:''}`:''}
   ${a.rc.length?`<h3 class="sec">Redirect chains · ${a.rc.length}</h3><div class="chains">${a.rc.map(chainHTML).join('')}</div>`:''}
+  ${a.rp.length?`<h3 class="sec">Repeated requests · ${a.rp.length}</h3>${repHTML(a.rp)}`:''}
   ${a.sz.list.length?`<h3 class="sec">Size &amp; compression · ${a.sz.list.length}</h3>${sizeHTML(a.sz)}`:''}
   <h3 class="sec">Hosts · ${hs.length}</h3>
   <div class="tablewrap hostwrap"><table id="hosts"><thead><tr><th>Host</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num opt">Total time</th></tr></thead><tbody>${hs.map(h=>{const pc=h.err?(h.rate>=.5?'bad':'warn'):'ok';
     return `<tr class="h ${hostF===h.host?'sel':''}" data-h="${esc(h.host)}" tabindex="0" title="${hostF===h.host?'Click to show all hosts':'Click to filter requests to this host'}"><td class="host">${hostName(h.host)}</td><td class="num">${h.n}</td><td class="num">${h.err?`<span class="pill ${pc}">${h.err}</span>`:'<span style="color:var(--dim)">0</span>'}</td><td class="num">${Math.round(h.rate*100)}%</td><td class="num opt">${fmtMs(h.time)}</td></tr>`}).join('')}</tbody></table></div>
   <h3 class="sec">Requests</h3>
-  <div class="filterbar"><input type="text" id="q" value="${esc(query)}" placeholder="Search URL, method or status (e.g. invoices, POST, 5xx)" aria-label="Search requests" autocomplete="off" spellcheck="false">${hostF!==null?`<button class="pill info" id="hostClear" title="Show all hosts">${hostName(hostF)} ✕</button>`:''}<span class="pill" id="qcount"></span></div>
+  <div class="filterbar"><input type="text" id="q" value="${esc(query)}" placeholder="Search URL, method or status (e.g. invoices, POST, 5xx)" aria-label="Search requests" autocomplete="off" spellcheck="false">${hostF!==null?`<button class="pill info" id="hostClear" title="Show all hosts">${hostName(hostF)} ✕</button>`:''}${rg?`<button class="pill info" id="repClear" title="Show all requests, not just this repeat">${rg.n}× ${esc(rg.method)} ${esc(clip(rg.path.split('?')[0].split('/').filter(Boolean).slice(-2).join('/')||'/',28))} ✕</button>`:''}<span class="pill" id="qcount"></span></div>
   <div class="chips" style="margin-bottom:10px">${types.map(t=>`<button data-f="${t}" class="${filter===t?'on':''}">${t}</button>`).join('')}</div>
   <div class="tablewrap"><table><thead><tr><th>Status</th><th>Method</th><th>URL</th><th>Type</th><th class="num">Size</th><th class="num">Time</th><th>Waterfall</th></tr></thead><tbody id="rows"></tbody></table></div>`;
   drawRows();
@@ -463,6 +528,9 @@ function render(){
   const pick=h=>{hostF=hostF===h?null:h;render();$('#q').scrollIntoView({block:'nearest'})};
   document.querySelectorAll('tr.h').forEach(r=>{r.onclick=()=>pick(r.dataset.h);r.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick(r.dataset.h)}}});
   const hc=$('#hostClear');if(hc)hc.onclick=()=>{hostF=null;render()};
+  const pickR=k=>{repF=repF===k?null:k;if(repF!==null){filter='all';hostF=null;query=''}render();$('#q').scrollIntoView({block:'nearest'})};
+  document.querySelectorAll('tr.rp').forEach(r=>{r.onclick=()=>pickR(r.dataset.k);r.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pickR(r.dataset.k)}}});
+  const rcl=$('#repClear');if(rcl)rcl.onclick=()=>{repF=null;render()};
   const hop=k=>{selected=k;drawRows();detail(entries[k])};
   document.querySelectorAll('.hop[data-i],tr.z').forEach(h=>{h.onclick=()=>hop(+h.dataset.i);h.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();hop(+h.dataset.i)}}});
 }
@@ -475,11 +543,11 @@ function matchQ(x,terms){
 
 function drawRows(){
   const {a,total}=view,terms=query.toLowerCase().split(/\s+/).filter(Boolean);
-  const byChip=entries.filter(x=>(hostF===null||x.host===hostF)&&(filter==='all'||(filter==='errors'?(x.status>=400||x.status===0):filter==='slow'?a.slowL.includes(x):x.type===filter)));
+  const byChip=entries.filter(x=>(hostF===null||x.host===hostF)&&(repF===null||repOf.get(x.i)===repF)&&(filter==='all'||(filter==='errors'?(x.status>=400||x.status===0):filter==='slow'?a.slowL.includes(x):x.type===filter)));
   const rows=terms.length?byChip.filter(x=>matchQ(x,terms)):byChip;
   const c=$('#qcount');c.textContent=rows.length===entries.length?entries.length+' rows':rows.length+' of '+entries.length;c.className='pill'+(rows.length<entries.length?' info':'');
   $('#rows').innerHTML=rows.map(x=>{const err=x.status>=400||x.status===0,sl=a.slowL.includes(x);const pc=err?(x.status>=500||x.status===0?'bad':'warn'):x.status>=300?'info':'ok';
-    return `<tr class="r ${selected===x.i?'sel':''}" data-i="${x.i}"><td><span class="pill ${pc}">${x.status||'ERR'}</span></td><td class="mono">${x.method}</td><td class="url" title="${esc(x.url)}"><small>${esc(x.host)}</small> ${esc(x.path)}</td><td class="mono">${x.type}</td><td class="num">${fmtB(x.size)}</td><td class="num">${fmtMs(x.time)}</td><td><div class="wf"><i class="${err?'err':sl?'slow':''}" style="left:${x.start/total*100}%;width:${Math.max(.8,x.time/total*100)}%"></i></div></td></tr>`}).join('')||`<tr><td colspan="7" class="empty" style="padding:22px">${terms.length?'No requests match “'+esc(query.trim())+'”'+(filter!=='all'?' in '+esc(filter):'')+(hostF!==null?' on '+(esc(hostF)||'(no host)'):'')+'. Press Esc to clear the search.':'No requests match this filter'+(hostF!==null?' on '+(esc(hostF)||'(no host)'):'')+'.'}</td></tr>`;
+    return `<tr class="r ${selected===x.i?'sel':''}" data-i="${x.i}"><td><span class="pill ${pc}">${x.status||'ERR'}</span></td><td class="mono">${esc(x.method)}</td><td class="url" title="${esc(x.url)}"><small>${esc(x.host)}</small> ${esc(x.path)}</td><td class="mono">${x.type}</td><td class="num">${fmtB(x.size)}</td><td class="num">${fmtMs(x.time)}</td><td><div class="wf"><i class="${err?'err':sl?'slow':''}" style="left:${x.start/total*100}%;width:${Math.max(.8,x.time/total*100)}%"></i></div></td></tr>`}).join('')||`<tr><td colspan="7" class="empty" style="padding:22px">${terms.length?'No requests match “'+esc(query.trim())+'”'+(filter!=='all'?' in '+esc(filter):'')+(hostF!==null?' on '+(esc(hostF)||'(no host)'):'')+'. Press Esc to clear the search.':'No requests match this filter'+(hostF!==null?' on '+(esc(hostF)||'(no host)'):'')+'.'}</td></tr>`;
   document.querySelectorAll('tr.r').forEach(r=>r.onclick=()=>{selected=+r.dataset.i;drawRows();detail(entries[selected])});
 }
 
@@ -504,6 +572,7 @@ function summary(){
   if(a.cf.length){L.push('','**CORS preflight failures**');a.cf.slice(0,5).forEach(c=>{const b=c.blocked!==null?entries[c.blocked]:null;L.push(`- \`OPTIONS ${U(c.x)}\` for ${c.reqM||'?'} from ${c.origin||'unknown origin'}: ${c.probs.map(p=>p.short).join('; ')}. ${b?(b.status===0?'Blocked the '+b.method+' (status 0)':'The '+b.method+' got '+b.status):'The '+(c.reqM||'real request')+' was never sent'}. Needs: ${c.fix.map(l=>l.startsWith('HTTP/')?'a 204 status':l).join(' / ')}`)})}
   if(a.hid.length){L.push('','**Errors inside 2xx responses**');a.hid.slice(0,10).forEach(h=>L.push(`- \`${h.x.status} ${h.x.method} ${U(h.x)}\`${h.op?' ('+(h.gql?'GraphQL ':'')+h.op+')':''} at ${h.x.e.startedDateTime}: ${h.items.slice(0,3).map(it=>(it.code?'['+it.code+'] ':'')+clip(it.msg,200)+(it.path?' (at '+it.path+')':'')).join('; ')}${h.items.length>3?'; +'+(h.items.length-3)+' more':''}${hdr(h.x.e.response?.headers,'x-request-id')?' (request id '+hdr(h.x.e.response.headers,'x-request-id')+')':''}`));if(a.hid.length>10)L.push(`- …and ${a.hid.length-10} more`)}
   if(a.rc.length){const RU=u=>red?shortU(u):u;L.push('','**Redirect chains**');a.rc.slice(0,5).forEach(c=>{const hs=c.urls.slice(0,12).map(u=>'`'+RU(u)+'`');L.push(`- ${c.loop?'Loop, repeats after '+c.loopAt+' hop'+(c.loopAt>1?'s':''):c.n+' redirects'}: ${hs.join(' → ')}${c.urls.length>12?' → …':''}`)})}
+  if(a.rp.length){L.push('','**Repeated requests**');a.rp.slice(0,5).forEach(g=>L.push(`- \`${g.method} ${red?repShort(g):g.key}\` ×${g.n} in ${repSpan(g)} (${g.statuses.map(([s,c])=>(s||'ERR')+(c>1?' ×'+c:'')).join(', ')}): ${REP_LBL[g.kind]}`));if(a.rp.length>5)L.push(`- …and ${a.rp.length-5} more`)}
   if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
   if(a.sz.list.length){L.push('','**Large or uncompressed responses**');a.sz.list.slice(0,5).forEach(z=>L.push(`- \`${U(z.x)}\`: ${fmtB(z.dec)}${z.wire>0&&z.wire!==z.dec?', '+fmtB(z.wire)+' on the wire':''}, ${z.comp?'compressed ('+(z.enc||'yes')+')':z.unc?'no compression, ~'+fmtB(z.save)+' likely saved by gzip/br':'binary'}`));if(a.sz.unc.length)L.push(`- Enabling compression would likely save ~${fmtB(a.sz.save)} in total`)}
   return L.join('\n');
@@ -555,6 +624,8 @@ function makeSample(){
     mk('GET','https://fonts.gstatic.com/s/inter/v13/inter-latin.woff2',200,'font/woff2',47220,{wait:22,recv:9},{dns:18,conn:20,ssl:26,rt:'font'}),
     mk('GET','https://app.acmecloud.io/static/img/logo.svg',200,'image/svg+xml',3120,{wait:24,recv:2},{rt:'image',gap:10,enc:'gzip',wire:1190}),
     mk('GET','https://api.acmecloud.io/v2/me',200,'application/json',812,{wait:142,recv:3},{dns:21,conn:29,ssl:38,rt:'fetch',gap:180,resH:{'x-request-id':'req_7Hc2KpX91'},body:'{"id":"usr_4182","email":"dana@northwind.co","role":"member","org":"org_northwind"}'}),
+    // The header and the sidebar each fetch /v2/me on mount, so it goes out twice while the first is still in flight.
+    mk('GET','https://api.acmecloud.io/v2/me',200,'application/json',812,{wait:139,recv:3},{rt:'fetch',gap:22,resH:{'x-request-id':'req_7Hc2KpX93'},body:'{"id":"usr_4182","email":"dana@northwind.co","role":"member","org":"org_northwind"}'}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/projects?limit=50',200,'application/json',9412,{wait:388,recv:11},{rt:'fetch',enc:'gzip',wire:2210,resH:{'x-request-id':'req_7Hc2LmQ04'}}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/billing/invoices',403,'application/json',214,{wait:96,recv:1},{rt:'fetch',st:'Forbidden',resH:{'x-request-id':'req_7Hc2Lr8Zt'},body:'{"error":{"code":"insufficient_role","message":"Role member cannot read billing. Required: admin or billing_manager."}}'}),
     mk('POST','https://api.acmecloud.io/v2/orgs/org_northwind/exports',502,'text/html',166,{wait:30012,recv:2},{rt:'fetch',st:'Bad Gateway',resH:{'x-request-id':'req_7Hc2M0aDe'},body:'<html><body><h1>502 Bad Gateway</h1><p>upstream timed out (30s) while reading response header from export-worker</p></body></html>',reqH:{'content-type':'application/json'}}),
@@ -562,8 +633,13 @@ function makeSample(){
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/members?page=2',200,'application/json',21880,{wait:2290,recv:17},{rt:'fetch',gap:20,enc:'gzip',wire:4290,resH:{'x-request-id':'req_7Hc2M4bLq'}}),
     mk('GET','https://app.acmecloud.io/static/img/empty-state.png',404,'text/html',148,{wait:44,recv:1},{rt:'image',st:'Not Found'}),
     mk('POST','https://events.thirdparty-analytics.com/v1/track',0,'',0,{wait:-1,recv:-1},{rt:'fetch',st:'',gap:15,ip:''}),
-    mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:61,recv:1},{rt:'fetch',st:'Too Many Requests',resH:{'retry-after':'30','x-request-id':'req_7Hc2N1wTs'},body:'{"error":{"code":"rate_limited","message":"Too many requests"}}'}),
-    mk('GET','https://api.acmecloud.io/v2/notifications/unread',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
+    // The notification bell re-fetches on every render with a cache-busting ?_= param, until the API starts returning 429.
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023732611',200,'application/json',58,{wait:66,recv:1},{rt:'fetch',gap:30,resH:{'x-request-id':'req_7Hc2Mx1Aa'},body:'{"unread":3}'}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023732794',200,'application/json',58,{wait:63,recv:1},{rt:'fetch',gap:180,resH:{'x-request-id':'req_7Hc2Mx4Bc'},body:'{"unread":3}'}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023732971',200,'application/json',58,{wait:70,recv:1},{rt:'fetch',gap:175,resH:{'x-request-id':'req_7Hc2Mx8Cd'},body:'{"unread":3}'}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023733158',200,'application/json',58,{wait:64,recv:1},{rt:'fetch',gap:185,resH:{'x-request-id':'req_7Hc2MyB2e'},body:'{"unread":3}'}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023733199',429,'application/json',96,{wait:61,recv:1},{rt:'fetch',st:'Too Many Requests',resH:{'retry-after':'30','x-request-id':'req_7Hc2N1wTs'},body:'{"error":{"code":"rate_limited","message":"Too many requests"}}'}),
+    mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023733321',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
     mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script',enc:'br',wire:24870}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',enc:'gzip',wire:1020,resH:{'x-request-id':'req_7Hc2P8kRr'}}),
     // Three calls that look green in DevTools but failed: a GraphQL resolver error, an invite rejected with success:false,
@@ -590,7 +666,7 @@ function makeSample(){
 }
 
 $('#sample').onclick=()=>{const s=makeSample();$('#raw').value=s;load(s);toast('Loaded a sample HAR from a fake SaaS dashboard')};
-$('#clear').onclick=()=>{entries=[];hidCache=null;query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
+$('#clear').onclick=()=>{entries=[];hidCache=null;repCache=null;repF=null;repOf=new Map();query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
 $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());toast('Summary copied as Markdown')}catch{toast('Clipboard blocked by the browser')}};
 $('#csv').onclick=downloadCSV;
 $('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
