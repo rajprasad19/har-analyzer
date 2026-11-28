@@ -131,6 +131,9 @@ tr.z{cursor:pointer}tr.z:hover td,tr.z:focus-visible td{background:var(--panel2)
 #sizes td.url{max-width:210px}#sizes th{white-space:nowrap}
 .save{color:var(--warn)}
 .hid>b{overflow-wrap:anywhere}
+#cache td.url{max-width:230px}#cache td.url>*{display:block;overflow:hidden;text-overflow:ellipsis}#cache td.url>span{font-weight:600}#cache td.url>.mpill{display:none}#cache th{white-space:nowrap}#cache td.sts{line-height:1.9}
+#cache td.cc{font:12px/1.5 var(--mono);min-width:150px}#cache td.cc span{display:block;overflow-wrap:anywhere}#cache td.cc .sent{color:var(--muted)}#cache td.cc .want{color:var(--ok)}
+@media (max-width:600px){#cache .opt,#cache .opt2{display:none}#cache td.url>.mpill{display:block;white-space:normal;font-weight:400;margin-top:5px;line-height:1.9}#cache th,#cache td{padding:6px 6px}#cache th{white-space:normal}#cache td.url{max-width:132px}#cache td.url small{display:none}#cache td.cc{min-width:0}}
 .hid .probs li .pill{white-space:normal;overflow-wrap:anywhere;max-width:48%}
 .hid .at{color:var(--dim);font-family:var(--mono);font-size:12px}
 @media (max-width:600px){.hid .probs li{flex-wrap:wrap;gap:4px 8px}.hid .probs li .pill{max-width:100%;border-radius:6px}.hid .probs li>span:last-child{flex-basis:100%}}
@@ -182,7 +185,7 @@ tr.rp.sel td{background:#10201e}tr.rp.sel td:first-child{box-shadow:inset 2px 0 
 
 <script>
 const $=s=>document.querySelector(s);
-let entries=[],filter='all',selected=-1,query='',hostF=null,view=null,hidCache=null,repF=null,repCache=null,repOf=new Map();
+let entries=[],filter='all',selected=-1,query='',hostF=null,view=null,hidCache=null,repF=null,repCache=null,repOf=new Map(),cacheMemo=null;
 const TCOL={blocked:'#5f6774',dns:'#a371f7',connect:'#f0883e',ssl:'#db61a2',send:'#58a6ff',wait:'#2dd4bf',receive:'#3fb950'};
 
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1600)}
@@ -208,7 +211,7 @@ function load(text){
   const t0=Math.min(...list.map(e=>Date.parse(e.startedDateTime)||0));
   entries=list.map((e,i)=>{const st=(Date.parse(e.startedDateTime)||t0)-t0;const u=(()=>{try{return new URL(e.request.url)}catch{return null}})();
     return {i,e,start:st,time:e.time??0,status:Math.max(0,Math.trunc(+e.response?.status||0)),method:e.request.method,url:e.request.url,host:u?.host||'',path:u?(u.pathname+(u.search||'')):e.request.url,type:typeOf(e),size:e.response?._transferSize??e.response?.bodySize??e.response?.content?.size??-1}});
-  hidCache=null;repCache=null;repF=null;selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
+  hidCache=null;repCache=null;cacheMemo=null;repF=null;selected=-1;query='';hostF=null;$('#detailPanel').style.display='none';render();$('#copy').disabled=false;$('#csv').disabled=false;
 }
 function showErr(m){$('#out').innerHTML='<div class="finding bad"><div><b>Couldn\'t read that</b><span>'+esc(m)+'</span></div></div>';$('#copy').disabled=true;$('#csv').disabled=true}
 
@@ -244,9 +247,12 @@ function analyze(){
   const sz=sizeIssues(),nm=z=>z.x.path.split('?')[0];
   if(sz.large.length){const z=sz.large[0],secs=(z.wire>0?z.wire:z.dec)*8/2e6;F.push(['warn',`${sz.large.length} large response${sz.large.length>1?'s':''} (≥ ${sz.kb} KB)`,`Biggest: ${nm(z)} at ${fmtB(z.dec)}${z.wire>0&&Math.abs(z.wire-z.dec)>1024?` (${fmtB(z.wire)} on the wire)`:''}, which takes about ${secs<10?secs.toFixed(1):Math.round(secs)} s to download on a 2 Mbps mobile connection before anything can use it.${sz.large.length>1?` Together the ${sz.large.length} large responses are ${fmtB(sz.large.reduce((s,y)=>s+y.dec,0))}.`:''} Check whether it's needed on first load and whether it can be split, paginated or, for images, resized.`])}
   if(sz.unc.length){const pct=Math.round(sz.save/sz.uncBytes*100);F.push([sz.save>=51200?'warn':'info',`${sz.unc.length} text response${sz.unc.length>1?'s':''} sent uncompressed`,`${sz.unc.length>1?'These were':'This was'} served with no gzip or br Content-Encoding. Turning compression on at the server or CDN would likely save about ${fmtB(sz.save)} of ${fmtB(sz.uncBytes)} (~${pct}%). Worst: ${sz.unc.slice(0,2).map(z=>nm(z)+' ('+fmtB(z.dec)+' → ~'+fmtB(z.dec-z.save)+')').join(', ')}. It's a config change, not a code change, and the cheapest fix for "slow on my connection".`])}
+  const ch=cacheIssues();
+  if(ch.list.length){const c=ch.list[0],n=ch.list.length;
+    F.push([ch.list.some(y=>y.fp||(y.full&&y.wire>=51200))?'warn':'info',`${n} static asset${n>1?'s':''} not cached well`,`Worst: ${nm(c)} ${c.why}. ${c.fp?`Its name has a content hash, so it's safe to cache for a year: Cache-Control: ${c.should}.`:`It should send Cache-Control: ${c.should}, or get a content hash in its name and be cached for a year.`}${ch.fullBytes>(c.full?c.wire:0)?` Across all ${n}, ${fmtB(ch.fullBytes)} is downloaded again on every visit.`:''} This is a common reason an app is "slow every time I open it" even on a good connection, and it's a server or CDN setting rather than a code change. What each one sent and should send is listed under Caching.`])}
   const mixed=entries.filter(x=>x.url.startsWith('http:'));if(mixed.length)F.push(['warn','Insecure http:// requests',`${mixed.length} request(s) over plain HTTP. Browsers may block these as mixed content.`]);
   if(!F.length)F.push(['ok','No obvious network problems','Every request succeeded and nothing crossed the slow threshold. If the bug persists, check the console and the response bodies.']);
-  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz,hid,rp};
+  return {F,fail,slowL,s4,s5,s0,rc,cors,cf,sz,hid,rp,ch};
 }
 
 // Repeated requests: grouped by method, URL and request body, ignoring cache-busting query params (_=, cb=, ts=, nonce=,
@@ -490,6 +496,55 @@ function sizeHTML(sz){
   <p class="note" style="margin:6px 0 14px">Highlighted sizes are over ${sz.kb} KB, and an encoding of <span class="pill warn">none</span> means the text was sent uncompressed. Size is the decoded body; on the wire is what was actually downloaded. Savings assume typical gzip ratios, so treat them as estimates.${sz.list.length>MAX?` Showing the ${MAX} biggest of ${sz.list.length}.`:''}</p>`;
 }
 
+// Caching on static assets: successful GET responses for JS, CSS, fonts and images, checked once per URL. Fingerprinted files
+// (a content hash in the name, like main.4f2a91.js) get a new name on every build, so they should be cached for a year and
+// marked immutable; anything else should be cached for at least an hour. Flagged: no-store, no Cache-Control or Expires at all,
+// no-cache / max-age=0 (revalidates on every load), or a lifetime under that bar. Doesn't depend on any threshold.
+const STATIC_T=new Set(['js','css','font','img']),YEAR=31536000,LONG=2592000,SHORT=3600,CRANK={nostore:0,none:1,reval:2,short:3};
+function fingerprinted(url){
+  let p;try{p=new URL(url).pathname}catch{return false}
+  const parts=(p.split('/').pop()||'').split(/[.\-_]/).slice(1,-1);
+  return parts.some(s=>!/^\d+x\d+$/i.test(s)&&!/^[a-z]{1,3}\d+$/i.test(s)&&/\d/.test(s)&&((/^[0-9a-f]{4,}$/i.test(s)&&/[a-f]/i.test(s))||(/^[A-Za-z0-9]{8,40}$/.test(s)&&/[A-Za-z]/.test(s))));
+}
+function fmtAge(s){if(s<60)return s+' s';if(s<3600)return Math.round(s/60)+' min';if(s<86400)return Math.round(s/3600)+' h';if(s<YEAR*.99){const d=Math.round(s/86400);return d+' day'+(d>1?'s':'')}const y=Math.round(s/YEAR);return y+' year'+(y>1?'s':'')}
+function cachePolicy(x){
+  const H=x.e.response?.headers||[],cc=hdr(H,'cache-control').trim(),ex=hdr(H,'expires').trim(),pr=hdr(H,'pragma').trim(),d={};
+  cc.toLowerCase().split(',').forEach(s=>{const m=s.trim().match(/^([a-z-]+)\s*(?:=\s*"?([^"]*)"?)?$/);if(m)d[m[1]]=m[2]??true});
+  let age=null;
+  if('max-age' in d){const n=parseInt(d['max-age'],10);age=isNaN(n)?0:Math.max(0,n)}
+  else if(ex){const t=Date.parse(ex),now=Date.parse(hdr(H,'date'))||Date.parse(x.e.startedDateTime);age=isNaN(t)||isNaN(now)?0:Math.max(0,Math.round((t-now)/1000))}
+  const fp=fingerprinted(x.url),val=!!(hdr(H,'etag')||hdr(H,'last-modified')),z=sizeInfo(x),wire=z.wire>0?z.wire:z.dec>0?z.dec:0;
+  const sent=cc||(ex?'Expires: '+ex:'')||(/no-cache/i.test(pr)?'Pragma: '+pr:'');
+  let kind=null;
+  if(d['no-store'])kind='nostore';
+  else if(d['no-cache']||age===0||(!cc&&!ex&&/no-cache/i.test(pr)))kind='reval';
+  else if(age===null)kind='none';
+  else if(age<(fp?LONG:SHORT))kind='short';
+  const should=fp?'public, max-age=31536000, immutable':'public, max-age=86400';
+  const why=kind==='nostore'?`sends Cache-Control: no-store, so the browser downloads all ${fmtB(wire)} again on every visit`
+    :kind==='none'?`sends ${cc?'Cache-Control: '+cc+' with no max-age':'no Cache-Control or Expires'}, so the browser has to guess how long to keep it${val?'':' and, with no ETag or Last-Modified to check against, may download it again'}`
+    :kind==='reval'?`sends ${sent}, so every load waits on a round trip to check it${val?'':' and, with no ETag or Last-Modified to check against, downloads all '+fmtB(wire)+' again'}`
+    :kind==='short'?`is only cached for ${fmtAge(age)}, so the next visit after that ${val?'has to revalidate it':'downloads it again'}`:'';
+  return {x,kind,cc,sent,age,fp,val,wire,should,why,full:kind==='nostore'||(kind==='reval'&&!val)};
+}
+function cacheIssues(){
+  if(cacheMemo)return cacheMemo;const seen=new Set(),list=[];let checked=0;
+  entries.forEach(x=>{if(!STATIC_T.has(x.type)||!(x.status>=200&&x.status<300)||x.status===204||String(x.method).toUpperCase()!=='GET')return;
+    const k=normU(x.url)||x.url;if(seen.has(k))return;seen.add(k);checked++;
+    const c=cachePolicy(x);if(c.kind)list.push(c)});
+  list.sort((p,q)=>CRANK[p.kind]-CRANK[q.kind]||q.fp-p.fp||q.wire-p.wire||p.x.i-q.x.i);
+  return cacheMemo={list,checked,fullBytes:list.filter(c=>c.full).reduce((s,c)=>s+c.wire,0)};
+}
+function cacheHTML(ch){
+  const MAX=15,shown=ch.list.slice(0,MAX);
+  const P={nostore:c=>['bad','no-store'],none:c=>['warn',c.cc?'no max-age':'missing'],reval:c=>['warn','revalidates'],short:c=>['info',fmtAge(c.age)]};
+  const rows=shown.map(c=>{const x=c.x,[pc,lbl]=P[c.kind](c),pth=x.path.split('?')[0],cut=pth.lastIndexOf('/')+1,fn=pth.slice(cut)||pth,dir=pth.slice(0,cut);
+    const pills=`<span class="pill ${pc}">${esc(lbl)}</span>${c.fp?' <span class="pill" title="Content hash in the filename, so a new build gets a new URL">hashed</span>':''}`;
+    return `<tr class="z" data-i="${x.i}" tabindex="0" title="${esc(x.url+' · '+c.why)}"><td class="url"><span>${esc(fn)}</span><small>${esc(x.host+dir)}</small><span class="mpill">${pills}</span></td><td class="sts opt2">${pills}</td><td class="cc"><span class="sent">${c.sent?esc(clip(c.sent,90)):'(none)'}</span><span class="want">→ ${esc(c.should)}</span></td><td class="num opt">${fmtB(c.wire)}</td></tr>`}).join('');
+  return `<div class="tablewrap hostwrap"><table id="cache"><thead><tr><th>Asset</th><th class="opt2">Problem</th><th>Cache-Control sent → should send</th><th class="num opt">Size</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <p class="note" style="margin:6px 0 14px">Checked ${ch.checked} static asset${ch.checked>1?'s':''} (JS, CSS, fonts, images). Files marked <span class="pill">hashed</span> have a content hash in the name, so a new build gets a new URL and they're safe to cache for a year. Anything else should be cached for at least an hour, ideally a day with an ETag so a stale copy is cheap to check. Click a row to see every header it sent.${ch.list.length>MAX?` Showing ${MAX} of ${ch.list.length}.`:''}</p>`;
+}
+
 function render(){
   if(!entries.length)return;
   const a=analyze(),total=Math.max(...entries.map(x=>x.start+x.time)),bytes=entries.reduce((s,x)=>s+(x.size>0?x.size:0),0);
@@ -514,6 +569,7 @@ function render(){
   ${a.rc.length?`<h3 class="sec">Redirect chains · ${a.rc.length}</h3><div class="chains">${a.rc.map(chainHTML).join('')}</div>`:''}
   ${a.rp.length?`<h3 class="sec">Repeated requests · ${a.rp.length}</h3>${repHTML(a.rp)}`:''}
   ${a.sz.list.length?`<h3 class="sec">Size &amp; compression · ${a.sz.list.length}</h3>${sizeHTML(a.sz)}`:''}
+  ${a.ch.list.length?`<h3 class="sec">Caching · ${a.ch.list.length} of ${a.ch.checked} static asset${a.ch.checked>1?'s':''}</h3>${cacheHTML(a.ch)}`:''}
   <h3 class="sec">Hosts · ${hs.length}</h3>
   <div class="tablewrap hostwrap"><table id="hosts"><thead><tr><th>Host</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num opt">Total time</th></tr></thead><tbody>${hs.map(h=>{const pc=h.err?(h.rate>=.5?'bad':'warn'):'ok';
     return `<tr class="h ${hostF===h.host?'sel':''}" data-h="${esc(h.host)}" tabindex="0" title="${hostF===h.host?'Click to show all hosts':'Click to filter requests to this host'}"><td class="host">${hostName(h.host)}</td><td class="num">${h.n}</td><td class="num">${h.err?`<span class="pill ${pc}">${h.err}</span>`:'<span style="color:var(--dim)">0</span>'}</td><td class="num">${Math.round(h.rate*100)}%</td><td class="num opt">${fmtMs(h.time)}</td></tr>`}).join('')}</tbody></table></div>
@@ -575,6 +631,7 @@ function summary(){
   if(a.rp.length){L.push('','**Repeated requests**');a.rp.slice(0,5).forEach(g=>L.push(`- \`${g.method} ${red?repShort(g):g.key}\` ×${g.n} in ${repSpan(g)} (${g.statuses.map(([s,c])=>(s||'ERR')+(c>1?' ×'+c:'')).join(', ')}): ${REP_LBL[g.kind]}`));if(a.rp.length>5)L.push(`- …and ${a.rp.length-5} more`)}
   if(a.slowL.length){L.push('','**Slowest requests**');a.slowL.sort((p,q)=>q.time-p.time).slice(0,5).forEach(x=>L.push(`- \`${x.method} ${U(x)}\`: ${fmtMs(x.time)} (server wait ${fmtMs(x.e.timings?.wait)})`))}
   if(a.sz.list.length){L.push('','**Large or uncompressed responses**');a.sz.list.slice(0,5).forEach(z=>L.push(`- \`${U(z.x)}\`: ${fmtB(z.dec)}${z.wire>0&&z.wire!==z.dec?', '+fmtB(z.wire)+' on the wire':''}, ${z.comp?'compressed ('+(z.enc||'yes')+')':z.unc?'no compression, ~'+fmtB(z.save)+' likely saved by gzip/br':'binary'}`));if(a.sz.unc.length)L.push(`- Enabling compression would likely save ~${fmtB(a.sz.save)} in total`)}
+  if(a.ch.list.length){L.push('','**Static assets not cached well**');a.ch.list.slice(0,5).forEach(c=>L.push(`- \`${U(c.x)}\`${c.fp?' (hashed)':''}: sent \`${c.cc?'Cache-Control: '+c.cc:c.sent||'no Cache-Control'}\`, should send \`Cache-Control: ${c.should}\``));if(a.ch.list.length>5)L.push(`- …and ${a.ch.list.length-5} more`);if(a.ch.fullBytes)L.push(`- ${fmtB(a.ch.fullBytes)} is downloaded again on every visit`)}
   return L.join('\n');
 }
 
@@ -618,11 +675,12 @@ function makeSample(){
       cache:{},timings,serverIPAddress:extra.ip||'104.18.22.61',_resourceType:extra.rt||''}};
   const E=[
     mk('GET','https://app.acmecloud.io/dashboard',200,'text/html',18432,{wait:180,recv:12},{dns:24,conn:31,ssl:42,st:'OK',rt:'document',gap:0,enc:'br',wire:4310}),
-    // The main bundle is 1.8 MB and the app server sends it (and the CSS) without gzip or br.
-    mk('GET','https://app.acmecloud.io/static/js/main.4f2a91.js',200,'application/javascript',1908520,{wait:38,recv:410},{rt:'script'}),
-    mk('GET','https://app.acmecloud.io/static/css/app.9c1d.css',200,'text/css',48210,{wait:31,recv:14},{rt:'stylesheet',gap:4}),
-    mk('GET','https://fonts.gstatic.com/s/inter/v13/inter-latin.woff2',200,'font/woff2',47220,{wait:22,recv:9},{dns:18,conn:20,ssl:26,rt:'font'}),
-    mk('GET','https://app.acmecloud.io/static/img/logo.svg',200,'image/svg+xml',3120,{wait:24,recv:2},{rt:'image',gap:10,enc:'gzip',wire:1190}),
+    // The main bundle is 1.8 MB and the app server sends it (and the CSS) without gzip or br. Both are fingerprinted, yet the
+    // bundle is sent with no-store and the CSS is only cached for 5 minutes, so returning visitors download them again.
+    mk('GET','https://app.acmecloud.io/static/js/main.4f2a91.js',200,'application/javascript',1908520,{wait:38,recv:410},{rt:'script',resH:{'cache-control':'no-store'}}),
+    mk('GET','https://app.acmecloud.io/static/css/app.9c1d.css',200,'text/css',48210,{wait:31,recv:14},{rt:'stylesheet',gap:4,resH:{'cache-control':'public, max-age=300',etag:'"9c1d-bc52"'}}),
+    mk('GET','https://fonts.gstatic.com/s/inter/v13/inter-latin.woff2',200,'font/woff2',47220,{wait:22,recv:9},{dns:18,conn:20,ssl:26,rt:'font',resH:{'cache-control':'public, max-age=31536000','last-modified':'Tue, 12 Mar 2024 18:20:00 GMT'}}),
+    mk('GET','https://app.acmecloud.io/static/img/logo.svg',200,'image/svg+xml',3120,{wait:24,recv:2},{rt:'image',gap:10,enc:'gzip',wire:1190,resH:{'cache-control':'public, max-age=86400',etag:'"logo-c30"'}}),
     mk('GET','https://api.acmecloud.io/v2/me',200,'application/json',812,{wait:142,recv:3},{dns:21,conn:29,ssl:38,rt:'fetch',gap:180,resH:{'x-request-id':'req_7Hc2KpX91'},body:'{"id":"usr_4182","email":"dana@northwind.co","role":"member","org":"org_northwind"}'}),
     // The header and the sidebar each fetch /v2/me on mount, so it goes out twice while the first is still in flight.
     mk('GET','https://api.acmecloud.io/v2/me',200,'application/json',812,{wait:139,recv:3},{rt:'fetch',gap:22,resH:{'x-request-id':'req_7Hc2KpX93'},body:'{"id":"usr_4182","email":"dana@northwind.co","role":"member","org":"org_northwind"}'}),
@@ -640,7 +698,7 @@ function makeSample(){
     mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023733158',200,'application/json',58,{wait:64,recv:1},{rt:'fetch',gap:185,resH:{'x-request-id':'req_7Hc2MyB2e'},body:'{"unread":3}'}),
     mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023733199',429,'application/json',96,{wait:61,recv:1},{rt:'fetch',st:'Too Many Requests',resH:{'retry-after':'30','x-request-id':'req_7Hc2N1wTs'},body:'{"error":{"code":"rate_limited","message":"Too many requests"}}'}),
     mk('GET','https://api.acmecloud.io/v2/notifications/unread?_=1795023733321',429,'application/json',96,{wait:58,recv:1},{rt:'fetch',st:'Too Many Requests',gap:120,resH:{'retry-after':'30'}}),
-    mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script',enc:'br',wire:24870}),
+    mk('GET','https://app.acmecloud.io/static/js/chunk-reports.11ab.js',200,'application/javascript',96420,{wait:41,recv:28},{rt:'script',enc:'br',wire:24870,resH:{'cache-control':'public, max-age=31536000, immutable'}}),
     mk('GET','https://api.acmecloud.io/v2/orgs/org_northwind/reports/weekly',200,'application/json',3120,{wait:1180,recv:6},{rt:'fetch',enc:'gzip',wire:1020,resH:{'x-request-id':'req_7Hc2P8kRr'}}),
     // Three calls that look green in DevTools but failed: a GraphQL resolver error, an invite rejected with success:false,
     // and an integration status that returns 200 with an error object.
@@ -666,7 +724,7 @@ function makeSample(){
 }
 
 $('#sample').onclick=()=>{const s=makeSample();$('#raw').value=s;load(s);toast('Loaded a sample HAR from a fake SaaS dashboard')};
-$('#clear').onclick=()=>{entries=[];hidCache=null;repCache=null;repF=null;repOf=new Map();query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
+$('#clear').onclick=()=>{entries=[];hidCache=null;repCache=null;cacheMemo=null;repF=null;repOf=new Map();query='';hostF=null;$('#raw').value='';$('#meta').textContent='';$('#copy').disabled=true;$('#csv').disabled=true;$('#detailPanel').style.display='none';$('#out').innerHTML='<div class="empty"><b>Nothing loaded yet</b>Drop a HAR file, paste one, or load the sample to see it in action.</div>'};
 $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(summary());toast('Summary copied as Markdown')}catch{toast('Clipboard blocked by the browser')}};
 $('#csv').onclick=downloadCSV;
 $('#closeDetail').onclick=()=>{$('#detailPanel').style.display='none';selected=-1;render()};
